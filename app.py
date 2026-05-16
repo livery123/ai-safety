@@ -1,12 +1,11 @@
 """
 Streamlit 应用入口：AI 治理监测演示看板（汇报版）。
 
-功能：四 Tab 看板（监测 / 情报 / 深度调研 / 系统）；缓存全部查询；
-     侧边栏受密码保护的操作区供现场演示触发同步与 Agent 侦察。
-输入：MySQL（articles / article_extractions）供看板只读；DB_PATH 仅 Agent 演示写 SQLite。
-输出：页面渲染；操作区副作用：网络请求 + MySQL（卫报同步）或 SQLite（Agent）。
-上下游：依赖 core.mysql_dashboard、core.db（init/save_incident）、crawler.orchestrator、crawler.agentic_crawl；
-        由 systemd 在服务器持续运行，Nginx 反代对外暴露。
+功能：水平导航单页渲染；情报 MySQL 分页；卫报同步 / Agent 侦察 / 深度调研走 SQLite 队列后台线程；
+     侧边栏受密码保护的操作区供现场演示。
+输入：MySQL（articles / article_extractions）；DB_PATH SQLite（Agent 演示 + ui_background_jobs 队列）。
+输出：页面渲染与任务状态轮询。
+上下游：core.mysql_dashboard、core.db、core.ui_jobs、crawler.*
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ import asyncio
 import os
 import sys
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -31,18 +30,18 @@ from core.config import (
     MYSQL_HOST,
     MYSQL_PORT,
 )
-from core.db import coerce_risk_domain, incident_from_extraction, init_db, save_incident
-from core.llm_client import OpenAICompatibleBackend
+from core.db import init_db
 from core.mysql_dashboard import (
-    fetch_dashboard_all_rows,
+    count_dashboard_incidents,
+    fetch_dashboard_incidents_page,
     fetch_dashboard_latest_rows,
+    fetch_distinct_content_types,
     get_dashboard_keywords_df,
     get_dashboard_stats,
     get_dashboard_taxonomy_df,
 )
-from core.mysql_db import get_research_report_by_id, list_research_reports, save_research_report
-from engine.rag_ingestion.hybrid_retrieval import evidence_hits_to_report_sources, hybrid_retrieve
-from engine.research_report import generate_research_report_markdown
+from core.mysql_db import get_research_report_by_id, list_research_reports
+from core.ui_jobs import get_job, start_job_thread
 from models.schema import RISK_DOMAIN_CHOICES
 
 # Windows 下 Playwright 子进程兼容
@@ -161,7 +160,7 @@ def _fig_subdomain_donut(labels: list[str], values: list[int]) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
-# 缓存包装：所有只读查询加 2 分钟缓存，翻 Tab 不重查库
+# 缓存包装：只读查询短 TTL；改用水平导航后仅在进入对应页时调用
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=120)
@@ -200,11 +199,39 @@ def _cached_latest_incidents(limit: int = 20) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=60)
-def _cached_all_incidents() -> pd.DataFrame:
-    """功能：缓存全量情报供详情 Tab 筛选（MySQL）。"""
+@st.cache_data(ttl=45)
+def _cached_distinct_content_types() -> List[str]:
+    """功能：资讯类别下拉；与全量 DF 无关，避免拉整表 DISTINCT。"""
     try:
-        return fetch_dashboard_all_rows()
+        return fetch_distinct_content_types()
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=30)
+def _cached_incidents_count(fdom: str, flevel: str, fkw: str) -> int:
+    """功能：分页总条数；空串表示不按该维度筛选。"""
+    try:
+        return count_dashboard_incidents(
+            risk_domain=fdom.strip() or None,
+            content_type=flevel.strip() or None,
+            keyword=fkw.strip() or None,
+        )
+    except Exception:
+        return 0
+
+
+@st.cache_data(ttl=30)
+def _cached_incidents_page(fdom: str, flevel: str, fkw: str, offset: int, limit: int) -> pd.DataFrame:
+    """功能：情报详情分页；limit 由页面控件传入（50～200）。"""
+    try:
+        return fetch_dashboard_incidents_page(
+            offset,
+            limit,
+            risk_domain=fdom.strip() or None,
+            content_type=flevel.strip() or None,
+            keyword=fkw.strip() or None,
+        )
     except Exception:
         return pd.DataFrame()
 
@@ -219,6 +246,111 @@ def _cached_research_report_list(limit: int = 25) -> pd.DataFrame:
         return pd.DataFrame(rows)
     except Exception:
         return pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------
+# 后台任务轮询：SQLite 仅存状态（core.ui_jobs）；不阻塞 Streamlit 请求线程。
+# ---------------------------------------------------------------------------
+
+
+def _background_job_panel(slot_key: str, title: str) -> None:
+    """功能：展示 ui_background_jobs 单条进度；completed 时顺带清一次 st 数据缓存以便看板刷新。"""
+    jid = st.session_state.get(slot_key)
+    if not jid:
+        return
+    row = get_job(str(jid))
+    with st.container(border=True):
+        if row is None:
+            st.warning(f"{title}：任务记录不存在。")
+            if st.button("关闭", key=f"dismiss_{slot_key}"):
+                st.session_state.pop(slot_key, None)
+                st.rerun()
+            return
+        stat = str(row.get("status") or "")
+        st.markdown(f"**{title}** · `{str(jid)[:8]}…` · 状态：**{stat}**")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🔄 刷新状态", key=f"refresh_{slot_key}"):
+                st.rerun()
+        with c2:
+            if stat in ("completed", "failed") and st.button("收起", key=f"close_{slot_key}"):
+                st.session_state.pop(slot_key, None)
+                st.session_state.pop(f"_{slot_key}_cleared_cache", None)
+                st.rerun()
+
+        res: Dict[str, Any] = row.get("result") or {}
+        err_msg = (row.get("error_text") or "").strip()
+        jt = str(row.get("job_type") or "")
+
+        if stat == "failed":
+            st.error(err_msg or "任务失败")
+            return
+
+        if stat != "completed":
+            st.caption("任务在后台执行中，稍后点「刷新状态」或与本页任一控件交互以重跑脚本。")
+            return
+
+        if not st.session_state.get(f"_{slot_key}_cleared_cache"):
+            st.cache_data.clear()
+            st.session_state[f"_{slot_key}_cleared_cache"] = True
+
+        if jt == "guardian_sync":
+            st.success(
+                f"✅ 卫报同步完成：入库 **{res.get('saved', 0)}**，"
+                f"跳过已有 {res.get('skipped_url_dup', 0)}，"
+                f"无关 {res.get('skipped_no_incident', 0)}，失败 {res.get('failed', 0)}"
+            )
+            nkw = res.get("new_keywords") or []
+            if nkw:
+                st.info("新增关键词：" + ", ".join(str(x) for x in nkw[:8]))
+            dlog = res.get("debug_log") or []
+            if dlog:
+                with st.expander("详细日志"):
+                    for line in dlog:
+                        st.caption(str(line))
+        elif jt == "agent_scout":
+            st.success(
+                f"✅ Agent 完成：提取 **{res.get('extracted', 0)}** 条，入库 **{res.get('saved', 0)}** 条"
+            )
+            nkw = res.get("new_keywords") or []
+            if nkw:
+                st.info("新增关键词：" + ", ".join(str(x) for x in nkw[:6]))
+            dbg = res.get("debug_info") or []
+            if dbg:
+                with st.expander("调试日志"):
+                    for line in dbg:
+                        st.caption(str(line))
+        elif jt == "deep_research":
+            prev_only = bool(res.get("preview_only"))
+            if prev_only:
+                st.info("已选择「仅检索」：跳过 LLM。")
+            hits_n = int(res.get("hits_count") or 0)
+            st.success(f"深度调研已完成：检索 **{hits_n}** 条证据。")
+            evs = res.get("evidence_previews") or []
+            if evs:
+                with st.expander("证据摘要", expanded=False):
+                    for i, it in enumerate(evs, 1):
+                        st.caption(
+                            f"**{i}.** article_id={it.get('article_id')} rrf={it.get('rrf')} — "
+                            f"{it.get('snippet', '')}…"
+                        )
+            if not prev_only:
+                report_md = str(res.get("report_markdown") or "")
+                if report_md.strip():
+                    st.markdown(report_md)
+                    rid = res.get("saved_report_id")
+                    if rid:
+                        st.caption(f"已保存至 MySQL，`research_reports.id` = **{rid}**")
+                    fn = f"DeepResearch_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
+                    st.download_button(
+                        "下载 Markdown 报告",
+                        data=report_md.encode("utf-8"),
+                        file_name=fn,
+                        mime="text/markdown",
+                        key=f"dr_dl_{slot_key}",
+                    )
+                else:
+                    st.warning("报告正文为空，请检查模型与 API。")
 
 
 # ---------------------------------------------------------------------------
@@ -244,9 +376,9 @@ def _demo_unlocked() -> bool:
 
 def main() -> None:
     """
-    功能：配置页面、渲染三 Tab 看板与侧边栏演示操作区。
+    功能：配置页面、水平导航单页渲染（避免 st.tabs 全量执行），演示操作区长任务走后台线程。
     输入：无参数；依赖 Streamlit session 与环境变量。
-    输出：无；副作用：init_db（Agent SQLite）；只读看板查 MySQL。
+    输出：无；副作用：init_db（Agent SQLite + ui_background_jobs）；按需查 MySQL。
     """
     st.set_page_config(
         page_title="全球 AI 治理监测系统",
@@ -297,30 +429,36 @@ def main() -> None:
 
     st.divider()
 
-    # --- 核心指标（全部来自数据库）---
-    total_incidents, total_tags, taxonomy_kinds = _cached_stats()
-    kw_df = _cached_keywords()
-    kw_total = len(kw_df) if not kw_df.empty else 0
+    # 水平单选：只执行当前功能区脚本，避免 st.tabs 预渲染所有子页。
+    _NAV_MAIN = ("📊 监测看板", "📋 情报详情", "📚 深度调研", "⚙️ 系统状态")
+    page = st.radio(
+        "",
+        _NAV_MAIN,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="nav_main_radio",
+    )
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("识别风险情报", total_incidents, help="已入库的 AI 治理/安全事件总数")
-    with c2:
-        st.metric("去重关键词总量", total_tags, help="从所有情报标签中提取的独立关键词数")
-    with c3:
-        st.metric("风险子域种数", taxonomy_kinds, help="动态演化的风险分类体系中不同子域数量")
-    with c4:
-        st.metric("自增长词库节点", kw_total, help="系统自动发现并持续追踪的领域术语数量")
+    if page == _NAV_MAIN[0]:
+        total_incidents, total_tags, taxonomy_kinds = _cached_stats()
+        kw_df = _cached_keywords()
+        kw_total = len(kw_df) if not kw_df.empty else 0
 
-    st.divider()
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("识别风险情报", total_incidents, help="已入库的 AI 治理/安全事件总数")
+        with c2:
+            st.metric("去重关键词总量", total_tags, help="从所有情报标签中提取的独立关键词数")
+        with c3:
+            st.metric("风险子域种数", taxonomy_kinds, help="动态演化的风险分类体系中不同子域数量")
+        with c4:
+            st.metric("自增长词库节点", kw_total, help="系统自动发现并持续追踪的领域术语数量")
 
-    # --- 四 Tab 看板 ---
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 监测看板", "📋 情报详情", "📚 深度调研", "⚙️ 系统状态"])
+        st.divider()
 
-    # ================================================================
-    # Tab 1 - 监测看板
-    # ================================================================
-    with tab1:
+        # ================================================================
+        # 监测看板
+        # ================================================================
         left, right = st.columns([3, 2])
 
         with left:
@@ -431,62 +569,68 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
             else:
                 st.caption("🌱 词库为空，触发一次同步后自动填充。")
 
-    # ================================================================
-    # Tab 2 - 情报详情
-    # ================================================================
-    with tab2:
-        st.markdown('<div class="section-header">📋 全量情报库（可筛选）</div>', unsafe_allow_html=True)
-        df_all = _cached_all_incidents()
+    elif page == _NAV_MAIN[1]:
+        st.markdown('<div class="section-header">📋 情报库（筛选 + MySQL 分页）</div>', unsafe_allow_html=True)
+        st.caption("列表按时间倒序；仅加载当前页，避免多人访问时一次性拉全表。")
 
-        if df_all.empty:
-            st.info("暂无数据，请先从演示操作区触发同步。")
+        domains = ["全部"] + list(RISK_DOMAIN_CHOICES)
+        fc1, fc2, fc3, fc4 = st.columns([1, 1, 2, 1])
+        with fc1:
+            sel_domain = st.selectbox("按主域筛选（三元模型）", domains, key="filter_domain")
+        with fc2:
+            lev_opts = ["全部"] + list(_cached_distinct_content_types())
+            sel_level = st.selectbox("按资讯类别筛选", lev_opts, key="filter_level")
+        with fc3:
+            kw_search = st.text_input("关键词搜索（标题/摘要）", key="kw_search")
+        with fc4:
+            page_lim = int(
+                st.select_slider("每页条数", options=[50, 100, 150, 200], value=50, key="inc_page_limit")
+            )
+
+        fdom = "" if sel_domain == "全部" else sel_domain
+        flev = "" if sel_level == "全部" else sel_level
+        fkw_s = (kw_search or "").strip()
+
+        total_n = _cached_incidents_count(fdom, flev, fkw_s)
+        pages = max(1, (total_n + page_lim - 1) // page_lim) if total_n > 0 else 1
+        _pkey = "inc_page_no_val"
+        if _pkey not in st.session_state:
+            st.session_state[_pkey] = 1
+        if int(st.session_state[_pkey]) > pages:
+            st.session_state[_pkey] = pages
+        pg_cur = int(st.number_input("页码", min_value=1, max_value=pages, step=1, key=_pkey))
+        offset = (pg_cur - 1) * page_lim
+        df_page = _cached_incidents_page(fdom, flev, fkw_s, offset, page_lim)
+
+        if total_n == 0:
+            st.info("暂无数据或当前筛选无结果；可先放宽筛选或从演示操作区触发同步。")
         else:
-            # 筛选条件
-            fc1, fc2, fc3 = st.columns(3)
-            with fc1:
-                domains = ["全部"] + list(RISK_DOMAIN_CHOICES)
-                sel_domain = st.selectbox("按主域筛选（三元模型）", domains, key="filter_domain")
-            with fc2:
-                levels = ["全部"] + sorted(df_all["资讯类别"].dropna().unique().tolist())
-                sel_level = st.selectbox("按资讯类别筛选", levels, key="filter_level")
-            with fc3:
-                kw_search = st.text_input("关键词搜索（标题/摘要）", key="kw_search")
-
-            df_view = df_all.copy()
-            if sel_domain != "全部":
-                df_view = df_view[df_view["主域"].map(lambda x: coerce_risk_domain(str(x))) == sel_domain]
-            if sel_level != "全部":
-                df_view = df_view[df_view["资讯类别"] == sel_level]
-            if kw_search.strip():
-                mask = (
-                    df_view["标题"].str.contains(kw_search, case=False, na=False)
-                    | df_view["摘要"].str.contains(kw_search, case=False, na=False)
+            st.caption(
+                f"符合条件 **{total_n}** 条 · 本页展示 **{len(df_page)}** 条 · 页 **{pg_cur}** / **{pages}**"
+            )
+            if not df_page.empty:
+                st.dataframe(
+                    df_page.drop(columns=["id"], errors="ignore"),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=420,
                 )
-                df_view = df_view[mask]
-
-            st.caption(f"共 {len(df_view)} 条情报（全库 {len(df_all)} 条）")
-            st.dataframe(
-                df_view.drop(columns=["id"], errors="ignore"),
-                use_container_width=True,
-                hide_index=True,
-                height=420,
-            )
-
-            # CSV 导出
-            csv_bytes = df_view.to_csv(index=False).encode("utf-8-sig")
-            st.download_button(
-                "📥 导出当前筛选结果（CSV）",
-                data=csv_bytes,
-                file_name=f"AI_Governance_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-            )
+                csv_bytes = df_page.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 导出本页（CSV）",
+                    data=csv_bytes,
+                    file_name=f"AI_Governance_page{pg_cur}_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    key="dl_page_csv",
+                )
 
         st.divider()
 
-        # 日报生成
         st.markdown('<div class="section-header">📄 自动化监测日报</div>', unsafe_allow_html=True)
         if st.button("📥 一键生成 AI 治理监测日报", key="gen_report"):
             df_report = _cached_latest_incidents(10)
+            kw_meta = _cached_keywords()
+            kw_daily_total = len(kw_meta) if not kw_meta.empty else 0
             if not df_report.empty:
                 report_md = f"## AI 治理动态监测内参（{datetime.now().strftime('%Y-%m-%d')}）\n\n"
                 report_md += "### 一、最新情报摘要\n\n"
@@ -502,16 +646,16 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                     report_md += "\n"
 
                 report_md += "\n### 二、新兴术语感知\n\n"
-                kw_top = _cached_keywords().head(10)
+                kw_top = kw_meta.head(10)
                 if not kw_top.empty:
                     report_md += "- 高频新词：" + "、".join(kw_top["keyword"].tolist()) + "\n"
 
-                report_md += f"\n### 三、系统统计\n\n"
+                report_md += "\n### 三、系统统计\n\n"
                 stats = _cached_stats()
                 report_md += (
                     f"- 已监测情报：{stats[0]} 条\n"
                     f"- 风险子域种数：{stats[2]} 种\n"
-                    f"- 关键词库节点：{kw_total} 个\n"
+                    f"- 关键词库节点：{kw_daily_total} 个\n"
                 )
 
                 st.code(report_md, language="markdown")
@@ -525,10 +669,7 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
             else:
                 st.warning("数据库暂无数据，请先触发同步。")
 
-    # ================================================================
-    # Tab 3 - 问答式深度调研（混合检索 + LLM 报告）
-    # ================================================================
-    with tab3:
+    elif page == _NAV_MAIN[2]:
         st.markdown(
             '<div class="section-header">📚 问答式深度调研</div>',
             unsafe_allow_html=True,
@@ -556,95 +697,33 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
         dr_save = st.checkbox("生成后写入 MySQL（research_reports + 引用行）", value=True, key="dr_save")
         dr_preview = st.checkbox("仅检索证据、暂不调用 LLM（调试用）", value=False, key="dr_preview")
 
-        if st.button("🔎 检索并生成报告", type="primary", use_container_width=True, key="dr_run"):
+        st.caption(
+            "检索与报告生成在**后台线程**执行，不阻塞其他访客；提交后在下方卡片点「刷新状态」查看进度。"
+        )
+
+        if st.button("🔎 后台提交：检索并生成报告", type="primary", use_container_width=True, key="dr_run"):
             if not (rq or "").strip():
                 st.warning("请先填写研究问题。")
-            elif not API_KEY:
-                st.error("未配置 DASHSCOPE_API_KEY，无法调用大模型生成报告。")
+            elif not dr_preview and not (API_KEY or "").strip():
+                st.error("未配置 DASHSCOPE_API_KEY，无法调用大模型生成报告（可勾选「仅检索」跳过 LLM）。")
             else:
-                hits = []
-                report_md = ""
-                retrieve_err: Optional[Exception] = None
-                gen_err: Optional[Exception] = None
-                with st.spinner("正在混合检索并生成报告（篇幅较长时可能需要 1～3 分钟）…"):
-                    try:
-                        tk = int(dr_top_k)
-                        pool = min(64, max(28, tk * 4))
-                        hits = hybrid_retrieve(
-                            rq.strip(),
-                            top_k=tk,
-                            risk_domain=dr_risk_domain,
-                            source=(dr_source or "").strip() or None,
-                            vector_top_n=pool,
-                            sparse_top_n=pool,
-                            max_chunks_per_article=3,
-                        )
-                    except Exception as e:
-                        retrieve_err = e
-                        hits = []
+                payload = {
+                    "question": (rq or "").strip(),
+                    "preview_only": bool(dr_preview),
+                    "save_report": bool(dr_save),
+                    "top_k": int(dr_top_k),
+                    "risk_domain": dr_risk_domain,
+                    "source": (dr_source or "").strip(),
+                    "llm_model": LLM_MODEL,
+                    "api_key": (API_KEY or "").strip(),
+                    "base_url": (BASE_URL or "").strip(),
+                }
+                jid = start_job_thread("deep_research", payload)
+                st.session_state["bg_deep_job"] = jid
+                st.session_state.pop("_bg_deep_job_cleared_cache", None)
+                st.rerun()
 
-                    if retrieve_err is None and hits and not dr_preview:
-                        try:
-                            backend = OpenAICompatibleBackend()
-                            report_md = generate_research_report_markdown(
-                                rq.strip(),
-                                hits,
-                                backend=backend,
-                                model=LLM_MODEL,
-                            )
-                        except Exception as e:
-                            gen_err = e
-                            report_md = ""
-
-                if retrieve_err is not None:
-                    st.error(f"检索失败：{type(retrieve_err).__name__}: {retrieve_err}")
-                elif hits:
-                    st.success(f"已检索 **{len(hits)}** 条证据（RRF 融合后；每篇最多 3 块）。")
-                    with st.expander("证据预览", expanded=False):
-                        for idx, h in enumerate(hits, 1):
-                            prev = (h.chunk_text or "").replace("\n", " ")[:220]
-                            st.caption(f"**{idx}.** article_id={h.article_id} rrf={h.rrf_score:.4f} — {prev}…")
-
-                if dr_preview:
-                    st.info("已开启「仅检索」：跳过 LLM；取消勾选后可生成完整报告。")
-                elif retrieve_err is not None:
-                    pass
-                elif not hits:
-                    st.warning("无命中证据，未生成正文。")
-                elif gen_err is not None:
-                    st.error(f"报告生成失败：{type(gen_err).__name__}: {gen_err}")
-                elif not (report_md or "").strip():
-                    st.warning("模型返回为空，请重试或检查 API/模型与上下文长度限制。")
-                else:
-                    st.markdown(report_md)
-                    src_payload = evidence_hits_to_report_sources(hits)
-                    filt = {
-                        "risk_domain": dr_risk_domain or "",
-                        "source": (dr_source or "").strip(),
-                        "top_k": int(dr_top_k),
-                    }
-                    if dr_save:
-                        try:
-                            rid = save_research_report(
-                                rq.strip(),
-                                filt,
-                                report_md,
-                                model_name=LLM_MODEL,
-                                sources=src_payload,
-                            )
-                            st.caption(f"已保存至 MySQL，`research_reports.id` = **{rid}**")
-                            st.cache_data.clear()
-                        except Exception as e:
-                            st.warning(f"报告已展示，但入库失败：{type(e).__name__}: {e}")
-
-                    fn = f"DeepResearch_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
-                    st.download_button(
-                        "下载 Markdown 报告",
-                        data=report_md.encode("utf-8"),
-                        file_name=fn,
-                        mime="text/markdown",
-                        key="dr_dl_md",
-                    )
+        _background_job_panel("bg_deep_job", "深度调研")
 
         st.divider()
         st.markdown("**近期已保存报告**")
@@ -680,11 +759,11 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                 except Exception as e:
                     st.error(f"加载失败：{type(e).__name__}: {e}")
 
-    # ================================================================
-    # Tab 4 - 系统状态
-    # ================================================================
-    with tab4:
+    elif page == _NAV_MAIN[3]:
         sc1, sc2 = st.columns(2)
+
+        kw_sys = _cached_keywords()
+        kw_total_sys = len(kw_sys) if not kw_sys.empty else 0
 
         with sc1:
             st.markdown('<div class="section-header">🔑 API 与服务状态</div>', unsafe_allow_html=True)
@@ -705,7 +784,7 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
             st.caption(f"• article_extractions：{s1} 条")
             st.caption(f"• 去重标签（全库）：{s2} 个")
             st.caption(f"• 主域×子域组合：{s3} 种")
-            st.caption(f"• 高频词池（展示 Top）：{kw_total} 个")
+            st.caption(f"• 高频词池（展示 Top）：{kw_total_sys} 个")
             st.caption(f"• MySQL：`{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}`")
             st.caption(f"• Agent 本地库（SQLite）：`{DB_PATH}`")
 
@@ -737,6 +816,11 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
             if not required_pwd:
                 st.caption("（未设置 DEMO_PASSWORD 环境变量，操作区默认开放）")
 
+            st.caption(
+                "**卫报同步 / Agent 侦察**在**后台线程**执行，队列记在 SQLite `ui_background_jobs`。"
+                "点按钮提交后，在下方卡片中「刷新任务状态」跟进进度。"
+            )
+
             op1, op2 = st.columns(2)
 
             # ---- 卫报一键同步 ----
@@ -744,34 +828,20 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                 st.markdown("**📡 卫报 AI 治理新闻同步**")
                 sync_pages = st.slider("拉取页数", 1, 5, 2, key="sync_pages")
                 sync_size = st.slider("每页条数", 3, 20, 8, key="sync_size")
-                if st.button("🚀 一键同步卫报新闻", type="primary", use_container_width=True, key="btn_sync"):
-                    with st.spinner("正在并发抽取，请稍候…"):
-                        try:
-                            from crawler.orchestrator import sync_guardian
-                            r = sync_guardian(
-                                max_pages=sync_pages,
-                                page_size=sync_size,
-                                rag_enabled=False,
-                            )
-                            st.cache_data.clear()
-                            if r.saved > 0:
-                                st.success(
-                                    f"✅ 同步完成！入库 **{r.saved}** 条，"
-                                    f"跳过已有 {r.skipped_url_dup} 条"
-                                )
-                            else:
-                                st.info(
-                                    f"同步完成：入库 {r.saved} 条，"
-                                    f"跳过已有 {r.skipped_url_dup}，"
-                                    f"无关 {r.skipped_no_incident}，失败 {r.failed}"
-                                )
-                            if r.new_keywords:
-                                st.info(f"新增关键词：{', '.join(r.new_keywords[:8])}")
-                            with st.expander("查看详细日志"):
-                                for line in r.debug_log:
-                                    st.caption(line)
-                        except Exception as e:
-                            st.error(f"同步失败：{type(e).__name__}: {e}")
+                if st.button(
+                    "🚀 后台提交卫报同步", type="primary", use_container_width=True, key="btn_sync"
+                ):
+                    jid = start_job_thread(
+                        "guardian_sync",
+                        {
+                            "max_pages": int(sync_pages),
+                            "page_size": int(sync_size),
+                            "rag_enabled": False,
+                        },
+                    )
+                    st.session_state["bg_guardian_job"] = jid
+                    st.session_state.pop("_bg_guardian_job_cleared_cache", None)
+                    st.rerun()
 
             # ---- Agent URL 侦察 ----
             with op2:
@@ -790,42 +860,28 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                     tab_api_key = st.text_input("API Key", value=API_KEY, type="password", key="scout_api_key")
                     tab_base_url = st.text_input("Base URL", value=BASE_URL, key="scout_base_url")
 
-                if st.button("🕵️ 启动 Agent 侦察", type="primary", use_container_width=True, key="btn_scout"):
-                    with st.spinner("Agent 正在深度分析中，请稍候…"):
-                        try:
-                            from crawler.agentic_crawl import run_agentic_crawl
-                            incidents_data, new_keywords, debug_info = asyncio.run(
-                                run_agentic_crawl(
-                                    scout_url,
-                                    api_key=tab_api_key or None,
-                                    base_url=tab_base_url or None,
-                                )
-                            )
-                        except Exception as e:
-                            incidents_data, new_keywords, debug_info = [], [], [f"执行异常: {e}"]
-
-                    with st.expander("调试日志"):
-                        for line in debug_info:
-                            st.caption(line)
-
-                    if incidents_data:
-                        saved_count = 0
-                        for inc_dict in incidents_data:
-                            try:
-                                inc = incident_from_extraction(inc_dict)
-                                ok, _ = save_incident(inc, scout_url)
-                                if ok:
-                                    saved_count += 1
-                            except Exception:
-                                pass
-                        st.cache_data.clear()
-                        st.success(
-                            f"✅ 提取 **{len(incidents_data)}** 条情报，入库 **{saved_count}** 条"
-                        )
-                        if new_keywords:
-                            st.info(f"新增关键词：{', '.join(new_keywords[:6])}")
+                if st.button(
+                    "🕵️ 后台提交 Agent 侦察", type="primary", use_container_width=True, key="btn_scout"
+                ):
+                    su = (scout_url or "").strip()
+                    if not su:
+                        st.warning("请填写目标 URL。")
                     else:
-                        st.warning("未发现 AI 治理相关线索，或 URL 无法访问/LLM 未响应。")
+                        jid = start_job_thread(
+                            "agent_scout",
+                            {
+                                "url": su,
+                                "api_key": (tab_api_key or "").strip(),
+                                "base_url": (tab_base_url or "").strip(),
+                            },
+                        )
+                        st.session_state["bg_scout_job"] = jid
+                        st.session_state.pop("_bg_scout_job_cleared_cache", None)
+                        st.rerun()
+
+            st.divider()
+            _background_job_panel("bg_guardian_job", "卫报同步")
+            _background_job_panel("bg_scout_job", "Agent URL 侦察")
         else:
             st.info("请输入正确的演示密码以解锁操作区。")
 
@@ -840,7 +896,7 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
 自动感知全球 AI 安全动态，基于三元意图风险模型结构化分类，持续演化知识体系。
 
 **核心能力**
-- 卫报 Content API 定时同步
+- 卫报同步与 Agent（后台线程 + SQLite 任务状态）
 - 任意 URL 深度 Agent 侦察
 - 问答式深度调研（混合检索 + 报告留痕）
 - LLM 并发抽取（5 路并发）

@@ -67,6 +67,23 @@ def init_db() -> None:
     """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # Streamlit UI 后台任务队列：仅存状态字符串，不重任务结果与 MySQL 业务混在一起。
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS ui_background_jobs (
+               id TEXT PRIMARY KEY,
+               job_type TEXT NOT NULL,
+               status TEXT NOT NULL,
+               payload_json TEXT NOT NULL,
+               result_json TEXT,
+               error_text TEXT,
+               created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL
+           )"""
+    )
+    c.execute(
+        """CREATE INDEX IF NOT EXISTS idx_ui_jobs_updated
+               ON ui_background_jobs (updated_at)"""
+    )
     c.execute(
         """CREATE TABLE IF NOT EXISTS incidents
                  (id TEXT PRIMARY KEY,
@@ -171,46 +188,6 @@ def _bump_risk_taxonomy_cursor(c: sqlite3.Cursor, domain: str, subdomain: str) -
     return True
 
 
-def get_stats() -> Tuple[int, int, int]:
-    """
-    功能：汇总看板指标。
-    输入：无。
-    输出：(事件条数, 去重标签数, risk_taxonomy 行数)；只读连接。
-    上下游：Streamlit 顶部 metric。
-    """
-    conn = sqlite3.connect(DB_PATH)
-    count = int(pd.read_sql_query("SELECT COUNT(*) as total FROM incidents", conn).iloc[0]["total"])
-    tags = pd.read_sql_query("SELECT tags FROM incidents", conn)
-    try:
-        tax_n = int(pd.read_sql_query("SELECT COUNT(*) AS n FROM risk_taxonomy", conn).iloc[0]["n"])
-    except Exception:
-        tax_n = 0
-    conn.close()
-    unique_tags: set = set()
-    if not tags.empty and "tags" in tags.columns:
-        for sublist in tags["tags"].dropna().astype(str).str.split(","):
-            if sublist is not None:
-                unique_tags.update(t for t in sublist if t)
-    return count, len(unique_tags), tax_n
-
-
-def get_risk_taxonomy_df() -> pd.DataFrame:
-    """
-    功能：读取完整风险分类演进表。
-    输入：无。
-    输出：按主域、count 排序的 DataFrame；只读。
-    """
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        df = pd.read_sql_query(
-            "SELECT domain, subdomain, count, first_seen FROM risk_taxonomy ORDER BY domain, count DESC",
-            conn,
-        )
-    except Exception:
-        df = pd.DataFrame(columns=["domain", "subdomain", "count", "first_seen"])
-    conn.close()
-    return df
-
 
 def list_taxonomy_pairs() -> List[Tuple[str, str]]:
     """
@@ -264,21 +241,6 @@ def save_incident(incident: AIIncident, source_url: str = "") -> Tuple[bool, boo
         conn.close()
 
 
-def get_watched_keywords() -> pd.DataFrame:
-    """
-    功能：读取待观察关键词池 Top 60（按 count）。
-    输入：无。
-    输出：DataFrame；只读。
-    """
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        df = pd.read_sql_query(
-            "SELECT keyword, count FROM watched_keywords ORDER BY count DESC LIMIT 60", conn
-        )
-    except Exception:
-        df = pd.DataFrame(columns=["keyword", "count"])
-    conn.close()
-    return df
 
 
 def update_watched_keywords(new_tags: list) -> list:
