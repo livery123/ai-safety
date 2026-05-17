@@ -74,10 +74,22 @@ async def run_agentic_crawl(
             llm_config=llm_config,
             schema=ArticleExtractionPayload.model_json_schema(),
             instruction=(
-                "你是 AI 治理与安全分析师。对页面输出**一个** JSON 对象，字段须符合 schema，"
-                "且与 MySQL article_extractions 一致：相关时 is_relevant=true，并填 "
-                "content_type(news/meeting/report/policy/opinion/other)、main_topic(含法案/会议等线索)、"
-                "risk_subdomains、entities、summary_structured、tags；\n"
+                "你是 AI 治理与安全分析师。对页面输出**一个** JSON 对象，字段须符合 schema。\n"
+                "【相关性判断——必须严格执行】\n"
+                "★ 必须是以下议题之一才能 is_relevant=true：\n"
+                "  1. AI安全法规/政策/标准（政府/国际组织发布或讨论）\n"
+                "  2. AI安全风险事件（AI系统造成的具体伤害、事故、滥用、漏洞）\n"
+                "  3. AI伦理与治理争议（算法歧视诉讼、AI隐私侵权、深度伪造诈骗案）\n"
+                "  4. AI治理机制（监管机构设立、AI安全峰会、国际协议、评估框架）\n"
+                "  5. AI安全研究（对齐、可解释性、红队测试等学术/政策报告）\n"
+                "★ 以下内容一律 is_relevant=false：\n"
+                "  - AI/科技产品发布（新手机/汽车/芯片功能参数，含具身智能/VLA等词汇的新车发布）\n"
+                "  - AI公司财报/股价/融资/IPO（无具体安全监管处罚的）\n"
+                "  - 纯技术原理/性能测评/算力参数\n"
+                "  - 传统互联网平台监管（非AI算法为核心议题的）\n"
+                "  - 企业AI战略泛泛表述、与AI无关的科技新闻\n"
+                "相关时填：is_relevant=true、content_type(news/meeting/report/policy/opinion/other)、"
+                "main_topic(含法案/会议等线索)、risk_subdomains、entities、summary_structured、tags；\n"
                 + RISK_DOMAIN_LLM_GUIDANCE
                 + "可选 relevance_reason（仅调试用）；"
                 "会议稿用会议级信息，勿拆成多条发言人；"

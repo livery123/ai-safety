@@ -1,9 +1,10 @@
 """
-Streamlit UI 后台任务：卫报同步、Agent 侦察、深度调研在长线程中执行，SQLite 仅存状态便于轮询。
+Streamlit UI 后台任务：新闻信源同步、Agent 侦察、深度调研在长线程中执行，SQLite 存状态便于轮询。
 
 功能：daemon 线程执行业务，主进程不写阻塞式 spinner；jobs 落在 DB_PATH.ui_background_jobs。
 输入：payload 为 dict，须 json 可序列化；输出：get_job(job_id) 读 status / result_json / error_text。
 上下游：仅 app.py 演示操作区与深度调研按钮调用；不复用 Celery/redis。
+扩展点：新增信源 Worker 只需在 _run 的 if-elif 分支中加 job_type（如 xinhua_tech_sync）与对应 _work_* 函数。
 """
 
 from __future__ import annotations
@@ -119,6 +120,14 @@ def start_job_thread(job_type: str, payload: Dict[str, Any]) -> str:
         try:
             if job_type == "guardian_sync":
                 res = _work_guardian_sync(payload)
+            elif job_type == "nyt_sync":
+                res = _work_nyt_sync(payload)
+            elif job_type == "wechat_rss_sync":
+                res = _work_wechat_rss_sync(payload)
+            elif job_type == "xinhua_tech_sync":
+                res = _work_xinhua_tech_sync(payload)
+            elif job_type == "sina_tech_sync":
+                res = _work_sina_tech_sync(payload)
             elif job_type == "agent_scout":
                 res = _work_agent_scout(payload)
             elif job_type == "deep_research":
@@ -144,12 +153,143 @@ def start_job_thread(job_type: str, payload: Dict[str, Any]) -> str:
 
 
 def _work_guardian_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    功能：卫报同步 Worker，在 daemon 线程内执行。
+    输入：payload 含 max_pages / page_size / rag_enabled。
+    输出：SyncResult 摘要 dict（saved / skipped / debug_log）。
+    上下游：start_job_thread → 此函数 → crawler.orchestrator.sync_guardian。
+    """
     max_pages = int(payload.get("max_pages", 2))
     page_size = int(payload.get("page_size", 8))
     rag_enabled = bool(payload.get("rag_enabled", False))
     from crawler.orchestrator import sync_guardian
 
     r = sync_guardian(max_pages=max_pages, page_size=page_size, rag_enabled=rag_enabled)
+    return {
+        "saved": r.saved,
+        "skipped_url_dup": r.skipped_url_dup,
+        "skipped_no_incident": r.skipped_no_incident,
+        "failed": r.failed,
+        "new_keywords": list(r.new_keywords[:20]),
+        "debug_log": list(r.debug_log),
+    }
+
+
+def _work_nyt_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    功能：NYT 同步 Worker，在 daemon 线程内执行。
+    输入：payload 含 max_pages / rag_enabled / query（可选）。
+    输出：SyncResult 摘要 dict（saved / skipped / debug_log）。
+    上下游：start_job_thread → 此函数 → crawler.orchestrator.sync_nyt。
+    """
+    max_pages = int(payload.get("max_pages", 2))
+    rag_enabled = bool(payload.get("rag_enabled", False))
+    query = (payload.get("query") or "").strip() or None
+    from crawler.orchestrator import sync_nyt
+
+    r = sync_nyt(max_pages=max_pages, query=query, rag_enabled=rag_enabled)
+    return {
+        "saved": r.saved,
+        "skipped_url_dup": r.skipped_url_dup,
+        "skipped_no_incident": r.skipped_no_incident,
+        "failed": r.failed,
+        "new_keywords": list(r.new_keywords[:20]),
+        "debug_log": list(r.debug_log),
+    }
+
+
+def _work_xinhua_tech_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    功能：新华网科技频道同步 Worker，在 daemon 线程内执行。
+    输入：payload 含 max_articles（默认 10）、rag_enabled；
+         page_urls 可选为非空字符串列表（自定义列表页），缺省则由适配器使用默认科技频道 URL。
+    输出：SyncResult 摘要 dict（saved / skipped / debug_log）。
+    上下游：start_job_thread → crawler.orchestrator.sync_xinhua_tech。
+    """
+    max_articles = int(payload.get("max_articles", 10))
+    rag_enabled = bool(payload.get("rag_enabled", False))
+    raw_urls = payload.get("page_urls")
+    page_urls: Optional[List[str]] = None
+    if isinstance(raw_urls, list):
+        page_urls = [str(u).strip() for u in raw_urls if str(u).strip()]
+        page_urls = page_urls or None
+    dry_run = bool(payload.get("dry_run", False))
+    from crawler.orchestrator import sync_xinhua_tech
+
+    r = sync_xinhua_tech(
+        max_articles=max_articles,
+        page_urls=page_urls,
+        rag_enabled=rag_enabled,
+        dry_run=dry_run,
+    )
+    return {
+        "saved": r.saved,
+        "skipped_url_dup": r.skipped_url_dup,
+        "skipped_no_incident": r.skipped_no_incident,
+        "failed": r.failed,
+        "new_keywords": list(r.new_keywords[:20]),
+        "debug_log": list(r.debug_log),
+    }
+
+
+def _work_sina_tech_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    功能：新浪科技频道同步 Worker，在 daemon 线程内执行。
+    输入：payload 含 max_articles（默认 10）、rag_enabled；
+         page_urls 可选为非空字符串列表（自定义列表页），缺省则用默认 tech.sina.com.cn。
+    输出：SyncResult 摘要 dict。
+    上下游：start_job_thread → crawler.orchestrator.sync_sina_tech。
+    """
+    max_articles = int(payload.get("max_articles", 10))
+    rag_enabled = bool(payload.get("rag_enabled", False))
+    raw_urls = payload.get("page_urls")
+    page_urls: Optional[List[str]] = None
+    if isinstance(raw_urls, list):
+        page_urls = [str(u).strip() for u in raw_urls if str(u).strip()]
+        page_urls = page_urls or None
+    dry_run = bool(payload.get("dry_run", False))
+    from crawler.orchestrator import sync_sina_tech
+
+    r = sync_sina_tech(
+        max_articles=max_articles,
+        page_urls=page_urls,
+        rag_enabled=rag_enabled,
+        dry_run=dry_run,
+    )
+    return {
+        "saved": r.saved,
+        "skipped_url_dup": r.skipped_url_dup,
+        "skipped_no_incident": r.skipped_no_incident,
+        "failed": r.failed,
+        "new_keywords": list(r.new_keywords[:20]),
+        "debug_log": list(r.debug_log),
+    }
+
+
+def _work_wechat_rss_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    功能：微信公众号 RSS（wechat2rss）同步 Worker，在 daemon 线程内执行。
+    输入：payload 可选 feed_names（公众号名称列表，空则全池）、max_articles_per_feed（默认 10）、
+         rag_enabled（默认 False）；dry_run 仅脚本调试使用，UI 不传则为 False（真实入库）。
+    输出：SyncResult 摘要 dict（saved / skipped / debug_log）。
+    上下游：start_job_thread → crawler.orchestrator.sync_wechat_rss。
+    """
+    raw_feeds = payload.get("feed_names")
+    feed_names: Optional[List[str]] = None
+    if isinstance(raw_feeds, list) and raw_feeds:
+        feed_names = [str(x).strip() for x in raw_feeds if str(x).strip()]
+        feed_names = feed_names or None
+    max_per = int(payload.get("max_articles_per_feed", 10))
+    rag_enabled = bool(payload.get("rag_enabled", False))
+    dry_run = bool(payload.get("dry_run", False))
+    from crawler.orchestrator import sync_wechat_rss
+
+    r = sync_wechat_rss(
+        feed_names=feed_names,
+        max_articles_per_feed=max_per,
+        rag_enabled=rag_enabled,
+        dry_run=dry_run,
+    )
     return {
         "saved": r.saved,
         "skipped_url_dup": r.skipped_url_dup,

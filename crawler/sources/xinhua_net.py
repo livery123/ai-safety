@@ -214,12 +214,26 @@ def extract_xinhua_tech_links(html: str, *, base_url: str = XINHUA_TECH_URL) -> 
 
 
 def _extract_date(text: str) -> Optional[str]:
-    match = re.search(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?", text)
+    """
+    功能：从正文全文中提取发布时间，统一规范化为 'YYYY-MM-DD HH:MM:SS' 字符串。
+    输入：all_text 拼接字符串。
+    输出：规范化时间字符串，无法解析时返回 None。
+    上下游：parse_xinhua_article；结果传入 RawArticle.web_publication_date，
+           由 orchestrator._persist_mysql_phase1 解析为 datetime 写入 MySQL。
+    """
+    # 优先匹配已有 ISO 风格（空格分隔，如 "2026-05-15 09:07:47"）
+    match = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)", text)
     if match:
-        return match.group(0)
-    match = re.search(r"\d{4}年\d{1,2}月\d{1,2}日\s*\d{1,2}:\d{2}", text)
+        date_part = match.group(1)
+        time_part = match.group(2)
+        if len(time_part) == 5:  # HH:MM -> HH:MM:00
+            time_part += ":00"
+        return f"{date_part} {time_part}"
+    # 匹配中文日期（如 "2026年5月15日 09:07"），规范化为统一格式
+    match = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})", text)
     if match:
-        return match.group(0)
+        y, mo, d, h, mi = match.groups()
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {int(h):02d}:{int(mi):02d}:00"
     return None
 
 
@@ -228,6 +242,20 @@ def _extract_source(text: str) -> Optional[str]:
     if match:
         return _clean_text(match.group(1))
     return None
+
+
+def _dedup_repeated_title(title: str) -> str:
+    """
+    新华网 H1 有时将标题重复写两遍（如"标题 标题"），此函数检测并去重。
+    按空格分词后判断前半与后半是否完全相等，相等则取前半。
+    """
+    words = title.split()
+    n = len(words)
+    if n >= 2 and n % 2 == 0:
+        half = n // 2
+        if words[:half] == words[half:]:
+            return " ".join(words[:half])
+    return title
 
 
 def _best_title(parser: _ArticleParser) -> str:
@@ -240,6 +268,7 @@ def _best_title(parser: _ArticleParser) -> str:
         title = _clean_text(value)
         if title:
             title = re.sub(r"[_-]新华网.*$", "", title).strip()
+            title = _dedup_repeated_title(title)
             return title or "(no title)"
     return "(no title)"
 

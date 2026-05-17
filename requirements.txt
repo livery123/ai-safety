@@ -9,3 +9,5 @@ chromadb>=0.5.0,<0.7
 pytest
 PyMySQL
 SQLAlchemy
+feedparser>=6.0.10
+beautifulsoup4>=4.12.0

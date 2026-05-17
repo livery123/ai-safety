@@ -16,9 +16,10 @@ import httpx
 from core.config import NYT_API_BASE, NYT_API_KEY
 from crawler.sources.guardian import RawArticle
 
+# NYT Article Search API 使用空格分隔的关键词检索（不支持 OR+引号组合语法，会返回 0 结果）。
+# 空格分隔词会做 AND 或近似相关性匹配，命中 AI 安全/治理/监管相关报道。
 DEFAULT_NYT_AI_GOVERNANCE_QUERY = (
-    '"artificial intelligence" OR "AI safety" OR "AI governance" '
-    'OR "AI regulation" OR "AI policy" OR "large language model"'
+    "artificial intelligence safety governance regulation policy"
 )
 
 _DEFAULT_PAGE_DELAY_SEC = 1.0
@@ -164,7 +165,8 @@ def search_nyt_articles(
     docs = response.get("docs")
     if not isinstance(docs, list):
         docs = []
-    meta = response.get("meta")
+    # NYT API 实际返回字段为 "metadata"，兼容旧命名 "meta"
+    meta = response.get("metadata") or response.get("meta")
     if not isinstance(meta, dict):
         meta = {}
 

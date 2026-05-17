@@ -139,6 +139,14 @@ def _looks_like_body_paragraph(text: str) -> bool:
         "新浪简介",
         "广告服务",
         "联系我们",
+        # 新浪财经广告/噪声段落
+        "炒股就看金麒麟",
+        "金麒麟分析师",
+        "24小时滚动播报",
+        "新浪财经意见反馈",
+        "扫描二维码关注",
+        "更多粉丝福利",
+        "sinafinance",
     )
     return not any(token in text.lower() for token in blocked)
 
@@ -159,7 +167,12 @@ def _is_sina_tech_article(url: str) -> bool:
         "digi.sina.com.cn",
         "zhongce.sina.com.cn",
     }
-    return host in allowed_hosts and path.endswith((".shtml", ".html"))
+    if host not in allowed_hosts:
+        return False
+    if not path.endswith((".shtml", ".html")):
+        return False
+    # 必须是具体文章（路径含 /doc- 前缀的 ID），过滤掉聚合/滚动/频道页
+    return "/doc-" in path
 
 
 def extract_sina_tech_links(html: str, *, base_url: str = SINA_TECH_URL) -> List[str]:
@@ -193,12 +206,26 @@ def _best_title(parser: _ArticleParser) -> str:
 
 
 def _extract_date(text: str) -> Optional[str]:
-    match = re.search(r"\d{4}年\d{1,2}月\d{1,2}日\s*\d{1,2}:\d{2}", text)
+    """
+    功能：从正文全文中提取发布时间，统一规范化为 'YYYY-MM-DD HH:MM:SS' 字符串。
+    输入：all_text 拼接字符串。
+    输出：规范化时间字符串，无法解析时返回 None。
+    上下游：parse_sina_tech_article；结果传入 RawArticle.web_publication_date，
+           由 orchestrator._persist_mysql_phase1 解析为 datetime 写入 MySQL。
+    """
+    # 优先匹配已有 ISO 风格（空格分隔，如 "2026-05-15 09:07:47"）
+    match = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)", text)
     if match:
-        return match.group(0)
-    match = re.search(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?", text)
+        date_part = match.group(1)
+        time_part = match.group(2)
+        if len(time_part) == 5:
+            time_part += ":00"
+        return f"{date_part} {time_part}"
+    # 匹配中文日期（如 "2026年5月15日 09:07"），规范化为统一格式
+    match = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})", text)
     if match:
-        return match.group(0)
+        y, mo, d, h, mi = match.groups()
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {int(h):02d}:{int(mi):02d}:00"
     return None
 
 
@@ -260,6 +287,42 @@ def fetch_sina_tech_article(
     with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers) as client:
         html, _status = _request_text(client, url)
     return parse_sina_tech_article(html, web_url=_canonical_url(url))
+
+
+def search_sina_tech_articles_multipage(
+    *,
+    page_urls: Optional[List[str]] = None,
+    max_articles_per_page: int = 10,
+    timeout: float = _DEFAULT_TIMEOUT_SEC,
+    page_delay_sec: float = 1.0,
+    article_delay_sec: float = _DEFAULT_ARTICLE_DELAY_SEC,
+) -> List[RawArticle]:
+    """
+    功能：抓取一个或多个新浪科技列表页，合并去重后返回 RawArticle 列表。
+    输入：page_urls 默认 [SINA_TECH_URL]；max_articles_per_page 每个列表页最多抓取文章数。
+    输出：RawArticle 列表（已按 web_url 去重）；副作用：HTTP 请求。
+    上下游：被 async_sync_sina_tech 在线程池内调用；适配器模式与 xinhua/nyt 保持一致。
+    """
+    urls = list(page_urls or [SINA_TECH_URL])
+    all_rows: List[RawArticle] = []
+    seen: set[str] = set()
+
+    for index, url in enumerate(urls):
+        if index > 0:
+            time.sleep(max(0.0, float(page_delay_sec)))
+        page = search_sina_tech_articles(
+            page_url=url,
+            max_articles=max_articles_per_page,
+            timeout=timeout,
+            article_delay_sec=article_delay_sec,
+        )
+        for article in page.articles:
+            if article.web_url in seen:
+                continue
+            seen.add(article.web_url)
+            all_rows.append(article)
+
+    return all_rows
 
 
 def search_sina_tech_articles(

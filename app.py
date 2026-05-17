@@ -1,11 +1,11 @@
 """
 Streamlit 应用入口：AI 治理监测演示看板（汇报版）。
 
-功能：水平导航单页渲染；情报 MySQL 分页；卫报同步 / Agent 侦察 / 深度调研走 SQLite 队列后台线程；
-     侧边栏受密码保护的操作区供现场演示。
+功能：水平导航单页渲染；情报 MySQL 分页；专项监测（政策/会议/文献占位）；卫报 / NYT / 新华网 / 新浪科技 / 微信公众号 RSS 同步与 Agent 侦察 /
+     深度调研走 SQLite 队列后台线程；侧边栏受密码保护的操作区供现场演示。
 输入：MySQL（articles / article_extractions）；DB_PATH SQLite（Agent 演示 + ui_background_jobs 队列）。
 输出：页面渲染与任务状态轮询。
-上下游：core.mysql_dashboard、core.db、core.ui_jobs、crawler.*
+上下游：core.mysql_dashboard、core.mysql_monitor_tracks、core.db、core.ui_jobs、crawler.*
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import altair as alt
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 from core.config import (
@@ -29,6 +29,7 @@ from core.config import (
     MYSQL_DATABASE,
     MYSQL_HOST,
     MYSQL_PORT,
+    NYT_API_KEY,
 )
 from core.db import init_db
 from core.mysql_dashboard import (
@@ -40,16 +41,27 @@ from core.mysql_dashboard import (
     get_dashboard_stats,
     get_dashboard_taxonomy_df,
 )
+from core.mysql_monitor_tracks import (
+    count_meeting_recent_days,
+    count_meeting_track_rows,
+    count_policy_recent_days,
+    count_policy_track_rows,
+    fetch_meeting_track_page,
+    fetch_policy_track_page,
+    literature_monitor_status,
+)
 from core.mysql_db import get_research_report_by_id, list_research_reports
 from core.ui_jobs import get_job, start_job_thread
+from crawler.sources import SINA_TECH_URL, XINHUA_TECH_URL
+from crawler.sources.wechat2rss import WECHAT_RSS_POOL
 from models.schema import RISK_DOMAIN_CHOICES
 
 # Windows 下 Playwright 子进程兼容
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-# 环形图配色（与页面深色主题一致）
-_DONUT_COLORS = (
+# 分布图配色（与页面深色主题一致；原环形图色板复用于条形图）
+_BAR_COLORS = (
     "#4f8ef7",
     "#3db88a",
     "#a78bfa",
@@ -65,98 +77,82 @@ _DONUT_COLORS = (
 )
 
 
-def _donut_color_list(n: int) -> list[str]:
-    base = list(_DONUT_COLORS)
+def _bar_color_scale(n: int) -> list[str]:
+    """
+    功能：为分类序列循环分配条形图颜色，保持与旧版环形图一致的色系。
+    输入：分类条数 n。
+    输出：长度 n 的十六进制颜色列表。
+    上下游：监测看板 Altair 分布图 encode.color。
+    """
+    base = list(_BAR_COLORS)
     out: list[str] = []
     while len(out) < n:
         out.extend(base)
     return out[:n]
 
 
-def _fig_domain_donut(labels: list[str], values: list[int]) -> go.Figure:
-    n = len(labels)
-    fig = go.Figure(
-        data=[
-            go.Pie(
-                labels=labels,
-                values=values,
-                hole=0.54,
-                pull=[0.025] * n,
-                marker=dict(
-                    colors=_donut_color_list(n),
-                    line=dict(color="#0f1424", width=2),
-                ),
-                textinfo="percent",
-                textposition="inside",
-                textfont=dict(color="#e8eaf6", size=13),
-                insidetextorientation="horizontal",
-                hovertemplate="<b>%{label}</b><br>篇数: %{value}<br>占比: %{percent}<extra></extra>",
-                sort=False,
-            )
-        ]
+def _altair_dash_empty_state(msg: str, *, height_px: int) -> alt.Chart:
+    """
+    功能：无数据时在仍使用 `st.altair_chart` 挂载点的前提下展示居中提示，避免「图表 vs 文案」组件类型切换。
+    输入：提示文案、画布高度（像素）。
+    输出：Altair Chart（仅文本层）。
+    上下游：监测看板右侧「风险主域 / 子域」空态。
+    """
+    src = pd.DataFrame({"msg": [msg]})
+    return (
+        alt.Chart(src)
+        .mark_text(align="center", baseline="middle", color="#94a3b8", fontSize=14)
+        .encode(
+            x=alt.value(0),
+            y=alt.value(0),
+            text=alt.Text("msg:N"),
+        )
+        .properties(height=int(height_px), width="container")
+        .configure_view(strokeWidth=0)
     )
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        showlegend=True,
-        legend=dict(
-            orientation="v",
-            yanchor="middle",
-            y=0.5,
-            x=1.02,
-            xanchor="left",
-            font=dict(color="#a8b3cf", size=11),
-            bgcolor="rgba(0,0,0,0)",
-            itemwidth=30,
-        ),
-        margin=dict(t=20, b=20, l=20, r=190),
-        height=360,
-    )
-    return fig
 
 
-def _fig_subdomain_donut(labels: list[str], values: list[int]) -> go.Figure:
-    n = len(labels)
-    fig = go.Figure(
-        data=[
-            go.Pie(
-                labels=labels,
-                values=values,
-                hole=0.54,
-                pull=[0.018] * n,
-                marker=dict(
-                    colors=_donut_color_list(n),
-                    line=dict(color="#0f1424", width=2),
-                ),
-                textinfo="percent",
-                textposition="inside",
-                textfont=dict(color="#e8eaf6", size=11),
-                insidetextorientation="horizontal",
-                hovertemplate="<b>%{label}</b><br>篇数: %{value}<br>占比: %{percent}<extra></extra>",
-                sort=False,
-            )
-        ]
+def _altair_dash_horizontal_bar(
+    labels: list[str],
+    values: list[int],
+    *,
+    height_px: int,
+    x_title: str = "篇数",
+) -> alt.Chart:
+    """
+    功能：将主域/子域计数渲染为水平条形图（非 Plotly iframe），降低主导航切换时前端 DOM 协调异常风险。
+    输入：类别标签、对应计数、图表高度、横轴标题。
+    输出：Altair Chart（条形 + 排序 Y 轴）。
+    上下游：`st.altair_chart`；数据来自 `_cached_taxonomy` 聚合结果。
+    """
+    rows: List[Tuple[str, int]] = []
+    for lb, vv in zip(labels, values):
+        rows.append(((lb or "").strip(), int(vv or 0)))
+    df = pd.DataFrame(rows, columns=["类别", "篇数"])  # noqa: PLC2401 — 与用户可见语义一致
+
+    dyn_h = max(120, min(int(height_px), 48 + 28 * len(df)))
+    palette = _bar_color_scale(len(df))
+
+    return (
+        alt.Chart(df)
+        .mark_bar(cornerRadiusEnd=4)
+        .encode(
+            x=alt.X("篇数:Q", title=x_title),
+            y=alt.Y("类别:N", sort="-x", title=None),
+            color=alt.Color(
+                "类别:N",
+                legend=None,
+                scale=alt.Scale(range=palette),
+            ),
+            tooltip=[
+                alt.Tooltip("类别:N", title="类别"),
+                alt.Tooltip("篇数:Q", title=x_title),
+            ],
+        )
+        .properties(height=dyn_h, width="container")
+        .configure_axis(labelLimit=280, titleColor="#a8b3cf", labelColor="#cbd5f5")
+        .configure_view(strokeOpacity=0)
     )
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        showlegend=True,
-        legend=dict(
-            orientation="v",
-            yanchor="middle",
-            y=0.5,
-            x=1.02,
-            xanchor="left",
-            font=dict(color="#a8b3cf", size=9),
-            bgcolor="rgba(0,0,0,0)",
-            itemwidth=30,
-        ),
-        margin=dict(t=20, b=20, l=20, r=240),
-        height=400,
-    )
-    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +244,78 @@ def _cached_research_report_list(limit: int = 25) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=45)
+def _cached_policy_track_count(kw: str) -> int:
+    """政策法规赛道总行数（可选关键词 AND）。"""
+    try:
+        return count_policy_track_rows(keyword=(kw or "").strip() or None)
+    except Exception:
+        return 0
+
+
+@st.cache_data(ttl=45)
+def _cached_policy_track_recent7(kw: str) -> int:
+    """政策法规赛道近 7 日条数。"""
+    try:
+        return count_policy_recent_days(7, keyword=(kw or "").strip() or None)
+    except Exception:
+        return 0
+
+
+@st.cache_data(ttl=45)
+def _cached_policy_track_page_rows(kw: str, offset: int, limit: int) -> pd.DataFrame:
+    """政策法规分页明细。"""
+    try:
+        return fetch_policy_track_page(
+            offset,
+            limit,
+            keyword=(kw or "").strip() or None,
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=45)
+def _cached_meeting_track_count(kw: str) -> int:
+    """国际会议赛道总行数。"""
+    try:
+        return count_meeting_track_rows(keyword=(kw or "").strip() or None)
+    except Exception:
+        return 0
+
+
+@st.cache_data(ttl=45)
+def _cached_meeting_track_recent30(kw: str) -> int:
+    """国际会议赛道近 30 日条数。"""
+    try:
+        return count_meeting_recent_days(30, keyword=(kw or "").strip() or None)
+    except Exception:
+        return 0
+
+
+@st.cache_data(ttl=45)
+def _cached_meeting_track_page_rows(kw: str, offset: int, limit: int) -> pd.DataFrame:
+    """国际会议分页明细。"""
+    try:
+        return fetch_meeting_track_page(
+            offset,
+            limit,
+            keyword=(kw or "").strip() or None,
+        )
+    except Exception:
+        return pd.DataFrame()
+
+
+def _textarea_urls_to_list(raw: str) -> Optional[List[str]]:
+    """
+    功能：演示区「每行一个列表页 URL」转为 orchestrator 的 page_urls；留空则用适配器默认频道。
+    输入：用户粘贴的多行字符串。
+    输出：去首尾空白的 URL 列表；若无有效行则 None。
+    """
+    lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+    return lines or None
+
+
 # ---------------------------------------------------------------------------
 # 后台任务轮询：SQLite 仅存状态（core.ui_jobs）；不阻塞 Streamlit 请求线程。
 # ---------------------------------------------------------------------------
@@ -256,10 +324,14 @@ def _cached_research_report_list(limit: int = 25) -> pd.DataFrame:
 def _background_job_panel(slot_key: str, title: str) -> None:
     """功能：展示 ui_background_jobs 单条进度；completed 时顺带清一次 st 数据缓存以便看板刷新。"""
     jid = st.session_state.get(slot_key)
-    if not jid:
-        return
-    row = get_job(str(jid))
+    row = get_job(str(jid)) if jid else None
+
+    # 始终占位同一 bordered 容器，避免 jid 从无到有或任务状态跳转时整块子树凭空插入/删减，诱发前端 insertBefore/reconcile 异常。
     with st.container(border=True):
+        if not jid:
+            st.caption(f"**{title}**：当前无进行中任务；如需查看进度请先提交后台任务。")
+            return
+
         if row is None:
             st.warning(f"{title}：任务记录不存在。")
             if st.button("关闭", key=f"dismiss_{slot_key}"):
@@ -294,9 +366,23 @@ def _background_job_panel(slot_key: str, title: str) -> None:
             st.cache_data.clear()
             st.session_state[f"_{slot_key}_cleared_cache"] = True
 
-        if jt == "guardian_sync":
+        if jt in (
+            "guardian_sync",
+            "nyt_sync",
+            "wechat_rss_sync",
+            "xinhua_tech_sync",
+            "sina_tech_sync",
+        ):
+            labels = {
+                "guardian_sync": "卫报",
+                "nyt_sync": "NYT",
+                "wechat_rss_sync": "微信 RSS",
+                "xinhua_tech_sync": "新华网科技",
+                "sina_tech_sync": "新浪科技",
+            }
+            label = labels.get(jt, jt)
             st.success(
-                f"✅ 卫报同步完成：入库 **{res.get('saved', 0)}**，"
+                f"✅ {label}同步完成：入库 **{res.get('saved', 0)}**，"
                 f"跳过已有 {res.get('skipped_url_dup', 0)}，"
                 f"无关 {res.get('skipped_no_incident', 0)}，失败 {res.get('failed', 0)}"
             )
@@ -430,15 +516,14 @@ def main() -> None:
     st.divider()
 
     # 水平单选：只执行当前功能区脚本，避免 st.tabs 预渲染所有子页。
-    _NAV_MAIN = ("📊 监测看板", "📋 情报详情", "📚 深度调研", "⚙️ 系统状态")
+    _NAV_MAIN = ("📊 监测看板", "📋 情报详情", "📌 专项监测", "📚 深度调研", "⚙️ 系统状态")
     page = st.radio(
-        "",
+        "主导航",
         _NAV_MAIN,
         horizontal=True,
         label_visibility="collapsed",
         key="nav_main_radio",
     )
-
     if page == _NAV_MAIN[0]:
         total_incidents, total_tags, taxonomy_kinds = _cached_stats()
         kw_df = _cached_keywords()
@@ -464,8 +549,8 @@ def main() -> None:
         with left:
             st.markdown('<div class="section-header">📍 最新监测情报</div>', unsafe_allow_html=True)
             df_latest = _cached_latest_incidents(20)
+            # 无论有无数据始终用 dataframe 挂载点，避免 info ↔ dataframe DOM 结构切换
             if not df_latest.empty:
-                # 主域缩短显示
                 if "主域" in df_latest.columns:
                     df_latest["主域"] = (
                         df_latest["主域"].astype(str)
@@ -479,9 +564,14 @@ def main() -> None:
                     height=380,
                 )
             else:
-                st.info("暂无监测数据，请从演示操作区触发同步。")
+                st.dataframe(
+                    pd.DataFrame({"提示": ["暂无监测数据，请从演示操作区触发同步。"]}),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=100,
+                )
 
-            # 三元主域分布
+            # 三元主域分布——始终创建 columns(3)，保持 DOM 结构稳定
             st.markdown(
                 '<div class="section-header" style="margin-top:24px">'
                 "🌳 动态风险分类体系（三元主域 → 子域）</div>",
@@ -502,24 +592,24 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                     """.strip()
                 )
             tax_df = _cached_taxonomy()
-            if not tax_df.empty:
-                dom_cols = st.columns(3)
-                for i, domain_label in enumerate(RISK_DOMAIN_CHOICES):
-                    short = domain_label.split("(")[0].strip()
-                    sub_df = tax_df[tax_df["domain"] == domain_label].head(10)
-                    with dom_cols[i]:
-                        st.markdown(f"**{short}**")
-                        if sub_df.empty:
-                            st.caption("—")
-                        else:
-                            for _, row in sub_df.iterrows():
-                                st.caption(f"· {row['subdomain']}（×{int(row['tax_count'])}）")
-            else:
-                st.caption("子域数据积累中，入库带 risk_subdomain 的情报后自动更新。")
+            # 始终创建 columns(3)，避免条件创建引发 DOM 错位
+            dom_cols = st.columns(3)
+            for i, domain_label in enumerate(RISK_DOMAIN_CHOICES):
+                short = domain_label.split("(")[0].strip()
+                sub_df = tax_df[tax_df["domain"] == domain_label].head(10) if not tax_df.empty else pd.DataFrame()
+                with dom_cols[i]:
+                    st.markdown(f"**{short}**")
+                    if sub_df.empty:
+                        st.caption("积累中…" if tax_df.empty else "—")
+                    else:
+                        for _, row in sub_df.iterrows():
+                            st.caption(f"· {row['subdomain']}（×{int(row['tax_count'])}）")
 
         with right:
             st.markdown('<div class="section-header">📊 风险主域分布</div>', unsafe_allow_html=True)
             tax_df_r = _cached_taxonomy()
+
+            # 始终渲染 Plotly，无数据时用占位图；避免 plotly_chart ↔ caption 结构切换
             if not tax_df_r.empty:
                 domain_agg = tax_df_r.groupby("domain")["tax_count"].sum().reset_index()
                 domain_agg["主域"] = (
@@ -530,13 +620,17 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                     domain_agg["主域"].tolist(),
                     pd.to_numeric(domain_agg["情报数"], errors="coerce").fillna(0).astype(int).tolist(),
                 )
-                st.plotly_chart(fig_domain, use_container_width=True)
+            else:
+                fig_domain = _fig_track_chart_placeholder("风险主域分布", "暂无分类统计数据。", height=360)
+            st.plotly_chart(fig_domain, use_container_width=True, key="dash_risk_domain_donut")
 
-                st.markdown(
-                    '<div class="section-header" style="margin-top:20px">'
-                    "🔥 高频风险子域 (Top 8 + 其他)</div>",
-                    unsafe_allow_html=True,
-                )
+            st.markdown(
+                '<div class="section-header" style="margin-top:20px">'
+                "🔥 高频风险子域 (Top 8 + 其他)</div>",
+                unsafe_allow_html=True,
+            )
+
+            if not tax_df_r.empty:
                 sub_sorted = tax_df_r.sort_values("tax_count", ascending=False).reset_index(drop=True)
                 short_dom = sub_sorted["domain"].str.replace(r"\s*\(.+$", "", regex=True).str.strip()
                 if len(sub_sorted) > 8:
@@ -552,11 +646,11 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                     labels = (sub_sorted["subdomain"] + " · " + short_dom).tolist()
                     vals = pd.to_numeric(sub_sorted["tax_count"], errors="coerce").fillna(0).astype(int).tolist()
                 fig_sub = _fig_subdomain_donut(labels, vals)
-                st.plotly_chart(fig_sub, use_container_width=True)
             else:
-                st.caption("暂无分类统计数据。")
+                fig_sub = _fig_track_chart_placeholder("高频风险子域", "暂无子域数据。", height=400)
+            st.plotly_chart(fig_sub, use_container_width=True, key="dash_subdomain_donut")
 
-            # 关键词池
+            # 关键词池：始终渲染同一元素类型（markdown），避免 markdown ↔ caption 切换
             st.markdown('<div class="section-header" style="margin-top:20px">🧬 自增长关键词池</div>', unsafe_allow_html=True)
             if not kw_df.empty:
                 top_kw = kw_df.head(40)
@@ -565,9 +659,9 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                     f'<span style="opacity:0.5;font-size:10px"> ×{row["count"]}</span></span>'
                     for _, row in top_kw.iterrows()
                 ])
-                st.markdown(tag_html, unsafe_allow_html=True)
             else:
-                st.caption("🌱 词库为空，触发一次同步后自动填充。")
+                tag_html = '<span style="color:#64748b;font-size:13px">🌱 词库为空，触发一次同步后自动填充。</span>'
+            st.markdown(tag_html, unsafe_allow_html=True)
 
     elif page == _NAV_MAIN[1]:
         st.markdown('<div class="section-header">📋 情报库（筛选 + MySQL 分页）</div>', unsafe_allow_html=True)
@@ -602,27 +696,25 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
         offset = (pg_cur - 1) * page_lim
         df_page = _cached_incidents_page(fdom, flev, fkw_s, offset, page_lim)
 
+        # 始终渲染 dataframe + download_button 挂载点，避免 info ↔ dataframe DOM 切换
         if total_n == 0:
-            st.info("暂无数据或当前筛选无结果；可先放宽筛选或从演示操作区触发同步。")
+            _show_df = pd.DataFrame({"提示": ["暂无数据或当前筛选无结果；可先放宽筛选或从演示操作区触发同步。"]})
+            _show_cap = ""
         else:
-            st.caption(
-                f"符合条件 **{total_n}** 条 · 本页展示 **{len(df_page)}** 条 · 页 **{pg_cur}** / **{pages}**"
+            _show_df = df_page.drop(columns=["id"], errors="ignore")
+            _show_cap = f"符合条件 **{total_n}** 条 · 本页展示 **{len(df_page)}** 条 · 页 **{pg_cur}** / **{pages}**"
+        if _show_cap:
+            st.caption(_show_cap)
+        st.dataframe(_show_df, use_container_width=True, hide_index=True, height=420)
+        if total_n > 0 and not df_page.empty:
+            csv_bytes = df_page.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "📥 导出本页（CSV）",
+                data=csv_bytes,
+                file_name=f"AI_Governance_page{pg_cur}_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                key="dl_page_csv",
             )
-            if not df_page.empty:
-                st.dataframe(
-                    df_page.drop(columns=["id"], errors="ignore"),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=420,
-                )
-                csv_bytes = df_page.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    "📥 导出本页（CSV）",
-                    data=csv_bytes,
-                    file_name=f"AI_Governance_page{pg_cur}_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv",
-                    key="dl_page_csv",
-                )
 
         st.divider()
 
@@ -670,10 +762,78 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                 st.warning("数据库暂无数据，请先触发同步。")
 
     elif page == _NAV_MAIN[2]:
-        st.markdown(
-            '<div class="section-header">📚 问答式深度调研</div>',
-            unsafe_allow_html=True,
+        # 单列纵向三张表：无子 tabs / 无 Plotly，与顶层 radio+if 主导航保持一致。
+        _TRACK_PREVIEW = 80
+        _POL_COLS = ["标题", "资讯类别", "主域", "子域", "摘要", "来源平台", "时间"]
+        _MTG_COLS = ["标题", "资讯类别", "主域", "议题(main_topic)", "子域", "摘要", "来源平台", "时间"]
+
+        st.markdown('<div class="section-header">📌 专项监测</div>', unsafe_allow_html=True)
+        st.caption(
+            "自上而下三块：**政策法规/科技政策**（policy+report）、**重大国际会议**（meeting）、"
+            "**文献占位**。各块仅展示关键词筛选下最新若干条；主导航仍为水平 radio。"
         )
+
+        st.markdown("### 📋 政策法规 / 科技政策")
+        kw_p_in = st.text_input(
+            "关键词（可选，标题/摘要，与 policy+report 类型 AND）",
+            key="track_policy_kw",
+        )
+        kw_ps = (kw_p_in or "").strip()
+        total_p = _cached_policy_track_count(kw_ps)
+        recent7_p = _cached_policy_track_recent7(kw_ps)
+        st.caption(
+            f"符合条件 **{total_p:,}** 条 · 近 7 日 **{recent7_p:,}** 条 · "
+            f"下表最多 **{_TRACK_PREVIEW}** 条（倒序）"
+        )
+        df_pol = _cached_policy_track_page_rows(kw_ps, 0, _TRACK_PREVIEW)
+        if total_p <= 0 or df_pol.empty:
+            show_pol = pd.DataFrame(columns=_POL_COLS)
+        else:
+            show_pol = df_pol.drop(columns=["id", "main_topic"], errors="ignore")
+        st.dataframe(show_pol, use_container_width=True, hide_index=True, height=340)
+
+        st.divider()
+
+        st.markdown("### 🌐 重大国际会议")
+        kw_m_in = st.text_input(
+            "关键词（可选，标题/摘要/main_topic AND meeting 类型）",
+            key="track_meeting_kw",
+        )
+        kw_ms = (kw_m_in or "").strip()
+        total_m = _cached_meeting_track_count(kw_ms)
+        recent30_m = _cached_meeting_track_recent30(kw_ms)
+        st.caption(
+            f"符合条件 **{total_m:,}** 条 · 近 30 日 **{recent30_m:,}** 条 · "
+            f"下表最多 **{_TRACK_PREVIEW}** 条（倒序）"
+        )
+        df_mtg = _cached_meeting_track_page_rows(kw_ms, 0, _TRACK_PREVIEW)
+        if total_m <= 0 or df_mtg.empty:
+            show_mtg = pd.DataFrame(columns=_MTG_COLS)
+        else:
+            show_mtg = df_mtg.drop(columns=["id"], errors="ignore").copy()
+            if "main_topic" in show_mtg.columns:
+                show_mtg.rename(columns={"main_topic": "议题(main_topic)"}, inplace=True)
+        st.dataframe(show_mtg, use_container_width=True, hide_index=True, height=340)
+
+        st.divider()
+
+        st.markdown("### 📖 国内外文献（预留）")
+        lit = literature_monitor_status()
+        planned_join = ", ".join(lit.get("planned_tables") or []) or "—"
+        df_lit = pd.DataFrame(
+            [
+                {
+                    "已实现": bool(lit.get("implemented")),
+                    "规划表": planned_join,
+                    "说明": str(lit.get("message") or "文献监测尚未实现。"),
+                }
+            ]
+        )
+        st.dataframe(df_lit, use_container_width=True, hide_index=True, height=90)
+
+    elif page == _NAV_MAIN[3]:
+        # 使用原生 Markdown 标题，不使用 raw `<div>`，减轻与后继表单/ dataframe 并排时的前端 reconciler insertBefore 错误。
+        st.markdown("### 📚 问答式深度调研")
         st.caption(
             "基于 Chroma 向量 + MySQL 全文（若已迁移）混合检索证据，由大模型生成带引用的 Markdown 报告；"
             "可选择写入 `research_reports` 便于留痕。"
@@ -728,38 +888,52 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
         st.divider()
         st.markdown("**近期已保存报告**")
         hist = _cached_research_report_list(30)
-        if hist.empty:
-            st.caption("暂无历史记录；成功保存后此处刷新可见（约 30s 内缓存）。")
-        else:
-            records = hist.to_dict("records")
-            pick_i = st.selectbox(
+        records = hist.to_dict("records") if not hist.empty else []
+        n_hist = len(records)
+
+        # 始终保持「文案 + selectbox + 载入按钮」三件组件，有空数据时控件禁用，
+        # 避免 hist 空/非空导致子节点数量翻转（与用户侧专项监测→深度调研切换时的 insertBefore 报错相关）。
+        st.caption(
+            "暂无保存的报告；成功后约 30s 内缓存可见。"
+            if n_hist <= 0
+            else f"共 **{n_hist}** 条缓存记录可供选择。"
+        )
+        pick_opts = list(range(max(1, n_hist)))
+
+        def _dr_hist_fmt(i: int) -> str:
+            if n_hist <= 0:
+                return "（暂无保存的报告）"
+            rr = records[i]
+            return f"#{int(rr['id'])} — " f"{str(rr.get('question') or '')[:60]}"
+
+        pick_ix = int(
+            st.selectbox(
                 "选择一条查看",
-                range(len(records)),
-                format_func=lambda i: (
-                    f"#{int(records[i]['id'])} — "
-                    f"{str(records[i].get('question') or '')[:60]}"
-                ),
+                pick_opts,
+                format_func=_dr_hist_fmt,
+                disabled=bool(n_hist <= 0),
                 key="dr_hist_pick",
             )
-            if st.button("载入所选报告", key="dr_hist_load"):
-                hid = int(records[pick_i]["id"])
-                try:
-                    row = get_research_report_by_id(hid)
-                    if row and row.get("report_markdown"):
-                        st.markdown(str(row["report_markdown"]))
-                        if row.get("sources"):
-                            with st.expander("引用行（research_report_sources）"):
-                                st.dataframe(
-                                    pd.DataFrame(row["sources"]),
-                                    use_container_width=True,
-                                    hide_index=True,
-                                )
-                    else:
-                        st.warning("未找到该报告。")
-                except Exception as e:
-                    st.error(f"加载失败：{type(e).__name__}: {e}")
+        )
+        if st.button("载入所选报告", key="dr_hist_load", disabled=bool(n_hist <= 0)):
+            hid = int(records[pick_ix]["id"])
+            try:
+                row = get_research_report_by_id(hid)
+                if row and row.get("report_markdown"):
+                    st.markdown(str(row["report_markdown"]))
+                    if row.get("sources"):
+                        with st.expander("引用行（research_report_sources）"):
+                            st.dataframe(
+                                pd.DataFrame(row["sources"]),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                else:
+                    st.warning("未找到该报告。")
+            except Exception as e:
+                st.error(f"加载失败：{type(e).__name__}: {e}")
 
-    elif page == _NAV_MAIN[3]:
+    elif page == _NAV_MAIN[4]:
         sc1, sc2 = st.columns(2)
 
         kw_sys = _cached_keywords()
@@ -779,6 +953,12 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
             else:
                 st.warning("Guardian API Key 未配置（可选）", icon="⚠️")
 
+            # NYT Key 状态
+            if NYT_API_KEY and len(NYT_API_KEY) > 5:
+                st.success("NYT API Key 已加载", icon="✅")
+            else:
+                st.warning("NYT API Key 未配置（可选）", icon="⚠️")
+
             st.markdown("**数据库统计（看板数据源：MySQL）**")
             s1, s2, s3 = _cached_stats()
             st.caption(f"• article_extractions：{s1} 条")
@@ -794,6 +974,16 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
             st.caption("• 检索：AI safety / AI governance / AI regulation 等")
             st.caption("• 拉取字段：标题、导语、正文、版块、发布时间")
             st.caption("• 并发抽取：5 篇文章同时调用 LLM，串行入库")
+            st.caption("**NYT Article Search API（已集成）**")
+            st.caption("• 检索：artificial intelligence safety governance regulation 等")
+            st.caption("• 拉取字段：标题、摘要（abstract）、版块、发布时间")
+            st.caption("• 并发抽取：5 篇文章同时调用 LLM，串行入库")
+            st.caption("**新华网科技频道（已集成）**")
+            st.caption(f"• 列表页抓取 [{XINHUA_TECH_URL}]({XINHUA_TECH_URL})，解析正文后并发 LLM 抽取入库")
+            st.caption("**新浪科技频道（已集成）**")
+            st.caption(f"• 列表页抓取 [{SINA_TECH_URL}]({SINA_TECH_URL})，解析正文后并发 LLM 抽取入库")
+            st.caption("**微信公众号 RSS（wechat2rss，已集成）**")
+            st.caption("• 配置池内公众号 RSS；拉取标题与正文摘要；后台同步可走 SQLite 任务队列")
             st.caption("**Crawl4AI（已集成，按 URL 侦察）**")
             st.caption("• 支持任意 URL：CSET、斯坦福 AI Index、OpenAI 博客等")
             st.caption("• 通过浏览器引擎渲染 JS 页面后提取结构化情报")
@@ -817,8 +1007,8 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                 st.caption("（未设置 DEMO_PASSWORD 环境变量，操作区默认开放）")
 
             st.caption(
-                "**卫报同步 / Agent 侦察**在**后台线程**执行，队列记在 SQLite `ui_background_jobs`。"
-                "点按钮提交后，在下方卡片中「刷新任务状态」跟进进度。"
+                "**卫报 / NYT / 新华网 / 新浪 / 微信 RSS / Agent 侦察**在**后台线程**执行，队列记在 SQLite "
+                "`ui_background_jobs`。点按钮提交后，在下方卡片中「刷新任务状态」跟进进度。"
             )
 
             op1, op2 = st.columns(2)
@@ -843,44 +1033,164 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                     st.session_state.pop("_bg_guardian_job_cleared_cache", None)
                     st.rerun()
 
-            # ---- Agent URL 侦察 ----
+            # ---- NYT 一键同步 ----
             with op2:
-                st.markdown("**🔍 Agent URL 深度侦察**")
-                scout_presets = {
-                    "CSET 新闻": "https://cset.georgetown.edu/news/",
-                    "斯坦福 AI Index": "https://aiindex.stanford.edu/",
-                    "OpenAI 博客": "https://openai.com/news/",
-                    "EU AI Act": "https://artificialintelligenceact.eu/news/",
-                }
-                preset_sel = st.selectbox("预设信源", ["自定义"] + list(scout_presets.keys()), key="scout_preset")
-                default_url = scout_presets.get(preset_sel, st.session_state.get("scout_url_val", ""))
-                scout_url = st.text_input("目标 URL", value=default_url, key="scout_url_val")
-
-                with st.expander("LLM 接口配置", expanded=False):
-                    tab_api_key = st.text_input("API Key", value=API_KEY, type="password", key="scout_api_key")
-                    tab_base_url = st.text_input("Base URL", value=BASE_URL, key="scout_base_url")
-
+                st.markdown("**📰 NYT AI 治理新闻同步**")
+                nyt_pages = st.slider("拉取页数", 1, 5, 2, key="nyt_sync_pages")
+                if not NYT_API_KEY:
+                    st.caption("⚠️ NYT_API_KEY 未配置，同步将失败")
                 if st.button(
-                    "🕵️ 后台提交 Agent 侦察", type="primary", use_container_width=True, key="btn_scout"
+                    "🚀 后台提交 NYT 同步", type="primary", use_container_width=True, key="btn_nyt_sync"
                 ):
-                    su = (scout_url or "").strip()
-                    if not su:
-                        st.warning("请填写目标 URL。")
-                    else:
-                        jid = start_job_thread(
-                            "agent_scout",
-                            {
-                                "url": su,
-                                "api_key": (tab_api_key or "").strip(),
-                                "base_url": (tab_base_url or "").strip(),
-                            },
-                        )
-                        st.session_state["bg_scout_job"] = jid
-                        st.session_state.pop("_bg_scout_job_cleared_cache", None)
-                        st.rerun()
+                    jid = start_job_thread(
+                        "nyt_sync",
+                        {
+                            "max_pages": int(nyt_pages),
+                            "rag_enabled": False,
+                        },
+                    )
+                    st.session_state["bg_nyt_job"] = jid
+                    st.session_state.pop("_bg_nyt_job_cleared_cache", None)
+                    st.rerun()
+
+            st.markdown("**📱 微信公众号 RSS（wechat2rss）**")
+            wx_keys = sorted(WECHAT_RSS_POOL.keys())
+            wx_feeds = st.multiselect(
+                "公众号（不选则同步池内全部）",
+                wx_keys,
+                default=[],
+                key="wx_rss_feeds",
+            )
+            wx_max = st.slider("每公众号最多篇数", 1, 20, 5, key="wx_rss_max")
+            if st.button(
+                "🚀 后台提交微信 RSS 同步",
+                type="secondary",
+                use_container_width=True,
+                key="btn_wx_rss_sync",
+            ):
+                jid = start_job_thread(
+                    "wechat_rss_sync",
+                    {
+                        "feed_names": wx_feeds if wx_feeds else None,
+                        "max_articles_per_feed": int(wx_max),
+                        "rag_enabled": False,
+                    },
+                )
+                st.session_state["bg_wechat_job"] = jid
+                st.session_state.pop("_bg_wechat_job_cleared_cache", None)
+                st.rerun()
+
+            xh_sn1, xh_sn2 = st.columns(2)
+
+            with xh_sn1:
+                st.markdown("**📰 新华网科技同步**")
+                st.caption(f"默认：[news.cn 科技]({XINHUA_TECH_URL})")
+                xh_max = st.slider("本轮最多抓取文章数", 3, 25, 10, key="xinhua_max_articles")
+                with st.expander("自定义列表页 URL（可选）", expanded=False):
+                    st.text_area(
+                        "每行一个 URL，留空则用默认科技频道",
+                        value="",
+                        height=72,
+                        key="xinhua_page_urls_txt",
+                        placeholder=XINHUA_TECH_URL,
+                    )
+                if st.button(
+                    "🚀 后台提交新华网同步",
+                    type="secondary",
+                    use_container_width=True,
+                    key="btn_xinhua_sync",
+                ):
+                    xh_urls = _textarea_urls_to_list(
+                        str(st.session_state.get("xinhua_page_urls_txt", "") or "")
+                    )
+                    jid = start_job_thread(
+                        "xinhua_tech_sync",
+                        {
+                            "max_articles": int(xh_max),
+                            "page_urls": xh_urls,
+                            "rag_enabled": False,
+                        },
+                    )
+                    st.session_state["bg_xinhua_job"] = jid
+                    st.session_state.pop("_bg_xinhua_job_cleared_cache", None)
+                    st.rerun()
+
+            with xh_sn2:
+                st.markdown("**📰 新浪科技同步**")
+                st.caption(f"默认：[tech.sina.com.cn]({SINA_TECH_URL})")
+                sn_max = st.slider("本轮最多抓取文章数", 3, 25, 10, key="sina_max_articles")
+                with st.expander("自定义列表页 URL（可选）", expanded=False):
+                    st.text_area(
+                        "每行一个 URL，留空则用默认新浪科技首页",
+                        value="",
+                        height=72,
+                        key="sina_page_urls_txt",
+                        placeholder=SINA_TECH_URL,
+                    )
+                if st.button(
+                    "🚀 后台提交新浪科技同步",
+                    type="secondary",
+                    use_container_width=True,
+                    key="btn_sina_sync",
+                ):
+                    sn_urls = _textarea_urls_to_list(
+                        str(st.session_state.get("sina_page_urls_txt", "") or "")
+                    )
+                    jid = start_job_thread(
+                        "sina_tech_sync",
+                        {
+                            "max_articles": int(sn_max),
+                            "page_urls": sn_urls,
+                            "rag_enabled": False,
+                        },
+                    )
+                    st.session_state["bg_sina_job"] = jid
+                    st.session_state.pop("_bg_sina_job_cleared_cache", None)
+                    st.rerun()
+
+            st.divider()
+
+            # ---- Agent URL 侦察 ----
+            st.markdown("**🔍 Agent URL 深度侦察**")
+            scout_presets = {
+                "CSET 新闻": "https://cset.georgetown.edu/news/",
+                "斯坦福 AI Index": "https://aiindex.stanford.edu/",
+                "OpenAI 博客": "https://openai.com/news/",
+                "EU AI Act": "https://artificialintelligenceact.eu/news/",
+            }
+            preset_sel = st.selectbox("预设信源", ["自定义"] + list(scout_presets.keys()), key="scout_preset")
+            default_url = scout_presets.get(preset_sel, st.session_state.get("scout_url_val", ""))
+            scout_url = st.text_input("目标 URL", value=default_url, key="scout_url_val")
+
+            with st.expander("LLM 接口配置", expanded=False):
+                tab_api_key = st.text_input("API Key", value=API_KEY, type="password", key="scout_api_key")
+                tab_base_url = st.text_input("Base URL", value=BASE_URL, key="scout_base_url")
+
+            if st.button(
+                "🕵️ 后台提交 Agent 侦察", type="primary", use_container_width=True, key="btn_scout"
+            ):
+                su = (scout_url or "").strip()
+                if not su:
+                    st.warning("请填写目标 URL。")
+                else:
+                    jid = start_job_thread(
+                        "agent_scout",
+                        {
+                            "url": su,
+                            "api_key": (tab_api_key or "").strip(),
+                            "base_url": (tab_base_url or "").strip(),
+                        },
+                    )
+                    st.session_state["bg_scout_job"] = jid
+                    st.session_state.pop("_bg_scout_job_cleared_cache", None)
+                    st.rerun()
 
             st.divider()
             _background_job_panel("bg_guardian_job", "卫报同步")
+            _background_job_panel("bg_nyt_job", "NYT 同步")
+            _background_job_panel("bg_wechat_job", "微信 RSS 同步")
+            _background_job_panel("bg_xinhua_job", "新华网科技同步")
+            _background_job_panel("bg_sina_job", "新浪科技同步")
             _background_job_panel("bg_scout_job", "Agent URL 侦察")
         else:
             st.info("请输入正确的演示密码以解锁操作区。")
@@ -896,7 +1206,7 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
 自动感知全球 AI 安全动态，基于三元意图风险模型结构化分类，持续演化知识体系。
 
 **核心能力**
-- 卫报同步与 Agent（后台线程 + SQLite 任务状态）
+- 多信源同步（卫报 / NYT / 新华网 / 新浪科技 / 微信 RSS，后台线程 + SQLite 任务状态）
 - 任意 URL 深度 Agent 侦察
 - 问答式深度调研（混合检索 + 报告留痕）
 - LLM 并发抽取（5 路并发）
