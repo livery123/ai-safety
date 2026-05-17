@@ -1,11 +1,11 @@
 """
 Streamlit 应用入口：AI 治理监测演示看板（汇报版）。
 
-功能：水平导航单页渲染；情报 MySQL 分页；专项监测（政策/会议/文献占位）；卫报 / NYT / 新华网 / 新浪科技 / 微信公众号 RSS 同步与 Agent 侦察 /
-     深度调研走 SQLite 队列后台线程；侧边栏受密码保护的操作区供现场演示。
+功能：水平导航单页渲染；情报 MySQL 分页；卫报同步 / Agent 侦察 / 深度调研走 SQLite 队列后台线程；
+     侧边栏受密码保护的操作区供现场演示。
 输入：MySQL（articles / article_extractions）；DB_PATH SQLite（Agent 演示 + ui_background_jobs 队列）。
 输出：页面渲染与任务状态轮询。
-上下游：core.mysql_dashboard、core.mysql_monitor_tracks、core.db、core.ui_jobs、crawler.*
+上下游：core.mysql_dashboard、core.db、core.ui_jobs、crawler.*
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -60,8 +59,8 @@ from models.schema import RISK_DOMAIN_CHOICES
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-# 分布图配色（与页面深色主题一致；原环形图色板复用于条形图）
-_BAR_COLORS = (
+# 环形图配色（与原先 Plotly 版监测看板一致，用于 Altair donut）
+_DONUT_COLORS = (
     "#4f8ef7",
     "#3db88a",
     "#a78bfa",
@@ -75,16 +74,18 @@ _BAR_COLORS = (
     "#38bdf8",
     "#94a3b8",
 )
+# 与旧 `go.Pie(hole=0.54)` 一致的内孔比例（内半径 / 外半径）
+_DONUT_HOLE_RATIO = 0.54
 
 
-def _bar_color_scale(n: int) -> list[str]:
+def _donut_color_list(n: int) -> list[str]:
     """
-    功能：为分类序列循环分配条形图颜色，保持与旧版环形图一致的色系。
-    输入：分类条数 n。
+    功能：为扇区序列循环分配颜色，与原先 Plotly 环形图同源色板一致。
+    输入：扇区个数 n。
     输出：长度 n 的十六进制颜色列表。
-    上下游：监测看板 Altair 分布图 encode.color。
+    上下游：监测看板 Altair 环形 encode.color Scale.range。
     """
-    base = list(_BAR_COLORS)
+    base = list(_DONUT_COLORS)
     out: list[str] = []
     while len(out) < n:
         out.extend(base)
@@ -112,46 +113,110 @@ def _altair_dash_empty_state(msg: str, *, height_px: int) -> alt.Chart:
     )
 
 
-def _altair_dash_horizontal_bar(
+def _altair_dash_donut(
     labels: list[str],
     values: list[int],
     *,
     height_px: int,
-    x_title: str = "篇数",
+    width_px: int,
+    mode: str,
 ) -> alt.Chart:
     """
-    功能：将主域/子域计数渲染为水平条形图（非 Plotly iframe），降低主导航切换时前端 DOM 协调异常风险。
-    输入：类别标签、对应计数、图表高度、横轴标题。
-    输出：Altair Chart（条形 + 排序 Y 轴）。
-    上下游：`st.altair_chart`；数据来自 `_cached_taxonomy` 聚合结果。
+    功能：甜甜圈图（Altair arc，无 Plotly iframe），视觉上对齐原先 Plotly 版：hole≈54%、边框色、扇区间隙、内侧百分比字号、右侧图例规格（主域/子域两套参数）。
+    输入：类别与计数；画布尺寸；mode 取 `domain`（风险主域）或 `subdomain`（高频子域）；篇数为 0 的扇区跳过。
+    输出：composite Chart（弧形 + 居扇区百分比文字 + 图例 + tooltip）。
+    上下游：`st.altair_chart`；数据源于 `_cached_taxonomy`。
     """
     rows: List[Tuple[str, int]] = []
     for lb, vv in zip(labels, values):
-        rows.append(((lb or "").strip(), int(vv or 0)))
-    df = pd.DataFrame(rows, columns=["类别", "篇数"])  # noqa: PLC2401 — 与用户可见语义一致
+        v = int(vv or 0)
+        if v > 0:
+            rows.append(((lb or "").strip(), v))
+    if not rows:
+        return _altair_dash_empty_state("暂无有效数据。", height_px=height_px)
 
-    dyn_h = max(120, min(int(height_px), 48 + 28 * len(df)))
-    palette = _bar_color_scale(len(df))
+    df = pd.DataFrame(rows, columns=["label", "count"])
+    if mode == "subdomain":
+        df = df.sort_values("count", ascending=False).reset_index(drop=True)
+    else:
+        df = df.reset_index(drop=True)
+    tot = int(df["count"].sum())
+    if tot <= 0:
+        return _altair_dash_empty_state("暂无有效数据。", height_px=height_px)
+
+    df["lab_ord"] = range(len(df))
+    palette = _donut_color_list(len(df))
+    domain_ord = df["label"].astype(str).tolist()
+
+    outer_r = int(max(88, min(142, height_px // 2 - 20)))
+    inner_r = int(round(outer_r * _DONUT_HOLE_RATIO))
+    mid_r = (inner_r + outer_r) / 2
+
+    # 对齐旧 Pie 的视觉「外拉」感：padAngle≈两度级微缝 + 边框；domain 略大对应 pull=0.025 / subdomain 对应 0.018
+    pad = 0.028 if mode == "domain" else 0.018
+    pct_font = 13 if mode == "domain" else 11
+    leg_fs = 11 if mode == "domain" else 9
+    leg_limit = 300 if mode == "domain" else 280
+
+    prep = (
+        alt.Chart(df)
+        .transform_joinaggregate(total="sum(count)", groupby=[])
+        .transform_calculate(
+            frac="datum.count / datum.total",
+            pct_txt="format(datum.frac,'.1%')",
+            mid_r=str(mid_r),
+        )
+    )
+
+    arcs = prep.encode(
+        theta=alt.Theta("count:Q", stack=True, title=None),
+        color=alt.Color(
+            "label:N",
+            scale=alt.Scale(domain=domain_ord, range=palette),
+            sort=None,
+            legend=alt.Legend(
+                title=None,
+                orient="right",
+                labelColor="#a8b3cf",
+                labelFontSize=leg_fs,
+                labelLimit=leg_limit,
+                symbolType="square",
+                symbolSize=76,
+                padding=10,
+                rowPadding=8,
+            ),
+            title=None,
+        ),
+        order=alt.Order("lab_ord:Q", sort="ascending"),
+        tooltip=[
+            alt.Tooltip("label:N", title="类别"),
+            alt.Tooltip("count:Q", title="篇数"),
+            alt.Tooltip("frac:Q", title="占比", format=".1%"),
+        ],
+    ).mark_arc(
+        innerRadius=inner_r,
+        outerRadius=outer_r,
+        stroke="#0f1424",
+        strokeWidth=2,
+        padAngle=pad,
+    )
+
+    labels_layer = prep.encode(
+        theta=alt.Theta("count:Q", stack="center"),
+        radius=alt.Radius("mid_r:Q"),
+        text=alt.Text("pct_txt:N"),
+    ).mark_text(
+        align="center",
+        baseline="middle",
+        fill="#e8eaf6",
+        fontSize=pct_font,
+    )
 
     return (
-        alt.Chart(df)
-        .mark_bar(cornerRadiusEnd=4)
-        .encode(
-            x=alt.X("篇数:Q", title=x_title),
-            y=alt.Y("类别:N", sort="-x", title=None),
-            color=alt.Color(
-                "类别:N",
-                legend=None,
-                scale=alt.Scale(range=palette),
-            ),
-            tooltip=[
-                alt.Tooltip("类别:N", title="类别"),
-                alt.Tooltip("篇数:Q", title=x_title),
-            ],
-        )
-        .properties(height=dyn_h, width="container")
-        .configure_axis(labelLimit=280, titleColor="#a8b3cf", labelColor="#cbd5f5")
+        (arcs + labels_layer)
+        .properties(height=int(height_px), width=int(width_px))
         .configure_view(strokeOpacity=0)
+        .configure_legend(symbolStrokeWidth=0)
     )
 
 
@@ -609,20 +674,28 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
             st.markdown('<div class="section-header">📊 风险主域分布</div>', unsafe_allow_html=True)
             tax_df_r = _cached_taxonomy()
 
-            # 始终渲染 Plotly，无数据时用占位图；避免 plotly_chart ↔ caption 结构切换
+            # 监测看板右侧使用 Altair 甜甜圈图（无 Plotly iframe），保持 `st.altair_chart` 与稳定 key。
             if not tax_df_r.empty:
                 domain_agg = tax_df_r.groupby("domain")["tax_count"].sum().reset_index()
                 domain_agg["主域"] = (
                     domain_agg["domain"].str.replace(r"\s*\(.+$", "", regex=True).str.strip()
                 )
                 domain_agg = domain_agg.rename(columns={"tax_count": "情报数"})
-                fig_domain = _fig_domain_donut(
+                chart_domain = _altair_dash_donut(
                     domain_agg["主域"].tolist(),
                     pd.to_numeric(domain_agg["情报数"], errors="coerce").fillna(0).astype(int).tolist(),
+                    height_px=360,
+                    width_px=420,
+                    mode="domain",
                 )
             else:
-                fig_domain = _fig_track_chart_placeholder("风险主域分布", "暂无分类统计数据。", height=360)
-            st.plotly_chart(fig_domain, use_container_width=True, key="dash_risk_domain_donut")
+                chart_domain = _altair_dash_empty_state("暂无分类统计数据。", height_px=360)
+            st.altair_chart(
+                chart_domain,
+                use_container_width=True,
+                theme="streamlit",
+                key="dash_risk_domain_donut",
+            )
 
             st.markdown(
                 '<div class="section-header" style="margin-top:20px">'
@@ -645,10 +718,15 @@ OECD AI 原则、欧盟《人工智能法案》等国内外治理框架中的风
                 else:
                     labels = (sub_sorted["subdomain"] + " · " + short_dom).tolist()
                     vals = pd.to_numeric(sub_sorted["tax_count"], errors="coerce").fillna(0).astype(int).tolist()
-                fig_sub = _fig_subdomain_donut(labels, vals)
+                chart_sub = _altair_dash_donut(labels, vals, height_px=400, width_px=560, mode="subdomain")
             else:
-                fig_sub = _fig_track_chart_placeholder("高频风险子域", "暂无子域数据。", height=400)
-            st.plotly_chart(fig_sub, use_container_width=True, key="dash_subdomain_donut")
+                chart_sub = _altair_dash_empty_state("暂无子域数据。", height_px=400)
+            st.altair_chart(
+                chart_sub,
+                use_container_width=True,
+                theme="streamlit",
+                key="dash_subdomain_donut",
+            )
 
             # 关键词池：始终渲染同一元素类型（markdown），避免 markdown ↔ caption 切换
             st.markdown('<div class="section-header" style="margin-top:20px">🧬 自增长关键词池</div>', unsafe_allow_html=True)
