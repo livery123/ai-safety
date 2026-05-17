@@ -1,6 +1,6 @@
 streamlit
-plotly
 pandas
+plotly
 crawl4ai
 pydantic
 python-dotenv

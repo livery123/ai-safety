@@ -16,6 +16,8 @@ venv/
 
 # 本地 Cursor 规则（不提交远端）
 .cursor/rules/chinese-docs-evolvable.mdc
+# Cursor 调试会话 NDJSON（按会话文件名，不入库）
+.cursor/debug-*.log
 
 # UV enviroment setting
 uv.lock
