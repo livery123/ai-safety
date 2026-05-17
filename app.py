@@ -16,6 +16,7 @@ import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
