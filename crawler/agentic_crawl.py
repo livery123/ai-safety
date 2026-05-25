@@ -88,7 +88,8 @@ async def run_agentic_crawl(
                 "  - 纯技术原理/性能测评/算力参数\n"
                 "  - 传统互联网平台监管（非AI算法为核心议题的）\n"
                 "  - 企业AI战略泛泛表述、与AI无关的科技新闻\n"
-                "相关时填：is_relevant=true、content_type(news/meeting/report/policy/opinion/other)、"
+                "相关时填：is_relevant=true、"
+                "content_type(news/meeting/report/policy/opinion/literature/other)，"
                 "main_topic(含法案/会议等线索)、risk_subdomains、entities、summary_structured、tags；\n"
                 + RISK_DOMAIN_LLM_GUIDANCE
                 + "可选 relevance_reason（仅调试用）；"

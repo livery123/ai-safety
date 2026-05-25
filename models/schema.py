@@ -27,7 +27,15 @@ RiskDomainLiteral = Literal[
 ]
 
 # 与 MySQL article_extractions.content_type 及 prompt 一致（勿与 incident 混在同表）
-ContentTypeLiteral = Literal["news", "meeting", "report", "policy", "opinion", "other"]
+ContentTypeLiteral = Literal[
+    "news",
+    "meeting",
+    "report",
+    "policy",
+    "opinion",
+    "literature",
+    "other",
+]
 
 
 class AIIncident(BaseModel):
@@ -73,7 +81,11 @@ class ArticleExtractionPayload(BaseModel):
     )
     content_type: ContentTypeLiteral = Field(
         default="other",
-        description="与 article_extractions.content_type 一致：news/meeting/report/policy/opinion/other",
+        description=(
+            "与 article_extractions.content_type 一致："
+            "news/meeting/report/policy/opinion/literature/other；"
+            "文献类（期刊/预印本论文）用 literature"
+        ),
     )
     main_topic: str = Field(
         default="",

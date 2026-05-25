@@ -14,11 +14,16 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.config import API_KEY, BASE_URL
 from core.llm_client import OpenAICompatibleBackend
 
-_ALLOWED_CONTENT_TYPES = frozenset({"news", "meeting", "report", "policy", "opinion", "other"})
+_ALLOWED_CONTENT_TYPES = frozenset(
+    {"news", "meeting", "report", "policy", "opinion", "literature", "other"}
+)
 _CONTENT_TYPE_ALIASES = {
     "policy_paper": "policy",
     "op_ed": "opinion",
     "research": "report",
+    "paper": "literature",
+    "journal_article": "literature",
+    "arxiv": "literature",
 }
 
 # ---------------------------------------------------------------------------
@@ -60,7 +65,7 @@ _USER_INSTRUCTION = (
     _RELEVANCE_FILTER
     + "【相关时】输出一个 JSON 对象，字段如下（与库表 article_extractions 一一对应，外加流程字段）：\n"
     "- is_relevant: true（流程用，不入 extraction 行）\n"
-    "- content_type: 必选其一 news | meeting | report | policy | opinion | other\n"
+    "- content_type: 必选其一 literature | meeting | report | policy | opinion | news（非以上则用 other）\n"
     "- main_topic: 一句话概括，≤512 字；新闻写报道核心，会议写主题/讨论焦点；"
     "法案/标准/常设会议/政策进程等线索也写进 main_topic（不要单独键）\n"
     "- " + RISK_DOMAIN_LLM_GUIDANCE
@@ -70,7 +75,8 @@ _USER_INSTRUCTION = (
     "- tags: 字符串数组，3–8 个检索关键词（落库 JSON 数组）\n"
     "- relevance_reason: 可选，简短说明为何相关（仅调试，不入 extraction 表）\n\n"
     "【新闻】侧重：讲什么、主体、治理/风险议题、tags。\n"
-    "【会议】会议级一条：会议名/主办方/时间地点（若有）/讨论主题/主体/与 AI 治理或安全的关系；勿拆每位发言人。\n\n"
+    "【会议】会议级一条：会议名/主办方/时间地点（若有）/讨论主题/主体/与 AI 治理或安全的关系；勿拆每位发言人。\n"
+    "【文献】学术论文、期刊/预印本条目：用 literature（report 侧重政策白皮书/综述报告；arxiv/学位论文等均归 literature）。\n\n"
     "【不相关时】**仅**输出两键，不要填其它字段：\n"
     '{ "is_relevant": false, "reject_reason": "no_ai_governance_content" }\n'
     "（reject_reason 可用简短英文代码或短语。）\n\n"
