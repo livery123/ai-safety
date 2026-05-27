@@ -1,0 +1,129 @@
+政策源 + 文献源 抓取质量报告
+生成时间: 2026-05-26T12:06:32
+
+========================================================================
+【政策源 → articles 流水线】
+国家: US, UK, EU, IN, BR | 每国上限: 5
+------------------------------------------------------------------------
+
+>> US
+  ✓ 条数: 5 | 源页: https://www.federalregister.gov/api/v1/documents.rss
+  --- [1] Restoring Integrity to America's Financial System
+      section : Policy / US / Federal Register
+      url     : OK | https://www.federalregister.gov/documents/2026/05/22/2026-10400/restoring-integrity-t
+      date    : OK | 2026-05-22
+      body    : OK | len=93
+  --- [2] Integrating Financial Technology Innovation Into Regulator
+      section : Policy / US / Federal Register
+      url     : OK | https://www.federalregister.gov/documents/2026/05/22/2026-10399/integrating-financial
+      date    : OK | 2026-05-22
+      body    : OK | len=93
+  --- [3] To Implement Certain Provisions in the Consolidated Approp
+      section : Policy / US / Federal Register
+      url     : OK | https://www.federalregister.gov/documents/2026/05/22/2026-10398/to-implement-certain-
+      date    : OK | 2026-05-22
+      body    : OK | len=93
+  --- [4] Airworthiness Directives; Pratt & Whitney RTX Corporation 
+      section : Policy / US / Federal Register
+      url     : OK | https://www.federalregister.gov/documents/2026/05/22/2026-10360/airworthiness-directi
+      date    : OK | 2026-05-22
+      body    : OK | len=1025
+  --- [5] Removal of Environmental Clearance Officer Review and Comm
+      section : Policy / US / Federal Register
+      url     : OK | https://www.federalregister.gov/documents/2026/05/22/2026-10356/removal-of-environmen
+      date    : OK | 2026-05-22
+      body    : OK | len=791
+  小结(前5条): url 5/5 | title 5/5 | 正文/摘要 5/5 | 日期 5/5
+
+>> UK
+  ✓ 条数: 5 | 源页: https://www.gov.uk/search/all.atom?keywords=artificial+intelligence+regulation&o
+  --- [1] Oil and gas: offshore environmental legislation
+      section : Policy / UK / GOV.UK AI
+      url     : OK | https://www.gov.uk/guidance/oil-and-gas-offshore-environmental-legislation
+      date    : OK | 2026-05-25
+      body    : OK | len=216
+  --- [2] The 2020 EIA Regulations
+      section : Policy / UK / GOV.UK AI
+      url     : OK | https://www.gov.uk/guidance/the-2020-eia-regulations
+      date    : OK | 2026-05-25
+      body    : OK | len=69
+  --- [3] When someone dies in Pakistan
+      section : Policy / UK / GOV.UK AI
+      url     : OK | https://www.gov.uk/guidance/when-someone-dies-in-pakistan
+      date    : OK | 2026-05-25
+      body    : OK | len=198
+  --- [4] Arrested or in prison in Bangladesh
+      section : Policy / UK / GOV.UK AI
+      url     : OK | https://www.gov.uk/guidance/arrested-or-in-prison-in-bangladesh
+      date    : OK | 2026-05-25
+      body    : OK | len=157
+  --- [5] When someone dies in Slovakia
+      section : Policy / UK / GOV.UK AI
+      url     : OK | https://www.gov.uk/guidance/when-someone-dies-in-slovakia
+      date    : OK | 2026-05-25
+      body    : OK | len=198
+  小结(前5条): url 5/5 | title 5/5 | 正文/摘要 5/5 | 日期 5/5
+
+>> EU
+  ✓ 条数: 5 | 源页: https://eur-lex.europa.eu/oj/daily-view/L-series/default.html?ojDate=25052026
+  --- [1] Commission Implementing Regulation (EU) 2026/1094 of 21 Ma
+      section : Policy / EU / II Non-legislative acts
+      url     : OK | https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=OJ:L_202601094
+      date    : OK | 2026-05-25
+      body    : OK | len=4247
+  --- [2] Commission Implementing Regulation (EU) 2026/1100 of 21 Ma
+      section : Policy / EU / II Non-legislative acts
+      url     : OK | https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=OJ:L_202601100
+      date    : OK | 2026-05-25
+      body    : OK | len=14818
+  --- [3] Council Decision (EU) 2026/1133 of 18 May 2026 on the conc
+      section : Policy / EU / II Non-legislative acts
+      url     : OK | https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=OJ:L_202601133
+      date    : OK | 2026-05-25
+      body    : OK | len=9093
+  --- [4] Commission Implementing Decision (EU) 2026/1089 of 20 May 
+      section : Policy / EU / II Non-legislative acts
+      url     : OK | https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=OJ:L_202601089
+      date    : OK | 2026-05-25
+      body    : OK | len=7089
+  --- [5] Commission Implementing Decision (EU) 2026/1145 of 20 May 
+      section : Policy / EU / II Non-legislative acts
+      url     : OK | https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=OJ:L_202601145
+      date    : OK | 2026-05-25
+      body    : OK | len=8956
+  小结(前5条): url 5/5 | title 5/5 | 正文/摘要 5/5 | 日期 5/5
+
+>> IN
+  ✓ 条数: 5 | 源页: https://prsindia.org/billtrack
+  --- [1] The Andhra Pradesh Reorganisation (Amendment) Bill, 2026
+      section : Policy / India / PRS
+      url     : OK | https://prsindia.org/billtrack/the-andhra-pradesh-reorganisation-amendment-bill-2026
+      date    : OK | 2026-04-02
+      body    : OK | len=1298
+  --- [2] The Jan Vishwas (Amendment of Provisions) Bill, 2026
+      section : Policy / India / PRS
+      url     : OK | https://prsindia.org/billtrack/the-jan-vishwas-amendment-of-provisions-bill-2026
+      date    : OK | 2026-04-02
+      body    : OK | len=5376
+  --- [3] The Central Armed Police Forces (General Administration) B
+      section : Policy / India / PRS
+      url     : OK | https://prsindia.org/billtrack/the-central-armed-police-forces-general-administration
+      date    : OK | 2026-04-02
+      body    : OK | len=2752
+  --- [4] The Transgender Persons (Protection of Rights) Amendment B
+      section : Policy / India / PRS
+      url     : OK | https://prsindia.org/billtrack/the-transgender-persons-protection-of-rights-amendment
+      date    : OK | 2026-03-25
+      body    : OK | len=4318
+  --- [5] The Industrial Relations Code (Amendment) Bill, 2026
+      section : Policy / India / PRS
+      url     : OK | https://prsindia.org/billtrack/the-industrial-relations-code-amendment-bill-2026
+      date    : OK | 2026-02-12
+      body    : OK | len=1291
+  小结(前5条): url 5/5 | title 5/5 | 正文/摘要 5/5 | 日期 5/5
+
+>> BR
+  ✓ 条数: 0 | 源页: https://www.lexml.gov.br/busca/search?sort=reverse-year;f2-tipoDocumento=Legisla
+
+合计拉取: 20 条
+抽样质量(前20条): url 20/20 | title 20/20 | 正文/摘要 20/20 | 日期 20/20

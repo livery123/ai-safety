@@ -136,3 +136,31 @@ CREATE TABLE IF NOT EXISTS research_report_sources (
     ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+
+-- 文献资料库（arXiv / Scopus / Springer）；不做 article_extractions 风险抽取
+CREATE TABLE IF NOT EXISTS literature_items (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  normalized_url VARCHAR(1024) NOT NULL,
+  source VARCHAR(64) NOT NULL DEFAULT '',
+  external_id VARCHAR(191) NOT NULL DEFAULT '',
+  doi VARCHAR(255) NOT NULL DEFAULT '',
+  title VARCHAR(1024) NOT NULL,
+  abstract TEXT NULL,
+  authors_json JSON NULL,
+  publication_name VARCHAR(512) NOT NULL DEFAULT '',
+  document_type VARCHAR(128) NOT NULL DEFAULT '',
+  subject_area VARCHAR(255) NOT NULL DEFAULT '',
+  published_at DATETIME NULL,
+  pdf_url VARCHAR(1024) NOT NULL DEFAULT '',
+  landing_url VARCHAR(1024) NOT NULL DEFAULT '',
+  raw_metadata_json JSON NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_literature_url (normalized_url(768)),
+  KEY idx_literature_source_time (source, published_at),
+  KEY idx_literature_doi (doi(191)),
+  KEY idx_literature_external (source, external_id),
+  FULLTEXT KEY ft_literature_title_abs (title, abstract)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+

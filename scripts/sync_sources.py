@@ -18,6 +18,8 @@
   ./venv/bin/python scripts/sync_sources.py --source wechat_rss --dry-run
   ./venv/bin/python scripts/sync_sources.py --source wechat_rss --feed-names 机器之心 --dry-run
   ./venv/bin/python scripts/sync_sources.py --source wechat_rss --no-rag
+  ./venv/bin/python scripts/sync_sources.py --source policy --countries US EU --max-articles 5 --dry-run
+  ./venv/bin/python scripts/sync_sources.py --source literature --literature-sources arxiv --dry-run
 """
 from __future__ import annotations
 
@@ -48,6 +50,17 @@ def _print_result(r: object, dry_run: bool = False) -> None:
         print(f"新关键词: {', '.join(kws[:10])}{'...' if len(kws) > 10 else ''}")
     if getattr(r, "new_subdomains", []):
         print(f"新子域: {', '.join(r.new_subdomains)}")  # type: ignore[attr-defined]
+
+
+def _print_literature_result(r: object, dry_run: bool = False) -> None:
+    """打印 LiteratureSyncResult。"""
+    for line in r.debug_log:  # type: ignore[attr-defined]
+        print(line)
+    print("\n--- 汇总 ---")
+    label = "可入库（dry-run）" if dry_run else "新入库"
+    print(f"{label}: {r.saved}")  # type: ignore[attr-defined]
+    print(f"已有（跳过）: {r.skipped_url_dup}")  # type: ignore[attr-defined]
+    print(f"失败: {r.failed}")  # type: ignore[attr-defined]
 
 
 def _run_guardian(args: argparse.Namespace) -> int:
@@ -140,22 +153,74 @@ def _run_wechat_rss(args: argparse.Namespace) -> int:
     return 1 if (r.failed > 0 and r.saved == 0) else 0
 
 
+def _run_policy(args: argparse.Namespace) -> int:
+    from crawler.orchestrator import sync_policy
+
+    countries = None
+    if args.countries:
+        raw = []
+        for item in args.countries:
+            raw.extend(c.strip().upper() for c in item.split(",") if c.strip())
+        countries = raw or None
+
+    r = sync_policy(
+        countries=countries,
+        max_articles_per_country=args.max_articles,
+        rag_enabled=False if args.no_rag else None,
+        dry_run=args.dry_run,
+        skip_prefilter=args.skip_prefilter,
+    )
+    _print_result(r, dry_run=args.dry_run)
+    return 1 if (r.failed > 0 and r.saved == 0) else 0
+
+
+def _run_literature(args: argparse.Namespace) -> int:
+    from crawler.orchestrator import sync_literature
+
+    sources = None
+    if args.literature_sources:
+        sources = [s.strip().lower() for s in args.literature_sources if s.strip()]
+
+    r = sync_literature(
+        sources=sources or ["arxiv"],
+        max_arxiv_per_category=args.max_articles,
+        max_springer_per_domain=args.max_articles,
+        scopus_max_results=args.max_articles,
+        dry_run=args.dry_run,
+    )
+    _print_literature_result(r, dry_run=args.dry_run)
+    return 1 if (r.failed > 0 and r.saved == 0) else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="多信源 AI 安全新闻同步入库")
     parser.add_argument(
         "--source",
-        choices=["guardian", "nyt", "xinhua_tech", "sina_tech", "wechat_rss"],
+        choices=["guardian", "nyt", "xinhua_tech", "sina_tech", "wechat_rss", "policy", "literature"],
         default="guardian",
         help=(
-            "信源：guardian（卫报，默认）| nyt（纽约时报）| "
-            "xinhua_tech（新华网科技）| sina_tech（新浪科技）| wechat_rss（微信公众号 RSS）"
+            "信源：guardian | nyt | xinhua_tech | sina_tech | wechat_rss | "
+            "policy（政策→articles）| literature（文献→literature_items）"
         ),
     )
     parser.add_argument("--pages", type=int, default=2, help="最大拉取页数（默认 2），guardian/nyt 有效")
     parser.add_argument("--page-size", type=int, default=10, help="每页条数，仅 guardian 有效（默认 10）")
     parser.add_argument(
         "--max-articles", type=int, default=10,
-        help="抓取文章数上限：xinhua_tech/sina_tech 为每次总数，wechat_rss 为每公众号（默认 10）",
+        help="抓取文章数上限：xinhua/sina 为总数，wechat_rss 为每公众号，policy 为每国家，literature 为每源上限（默认 10）",
+    )
+    parser.add_argument(
+        "--countries", type=str, nargs="+", default=None,
+        help="policy 专用：国家代码 US UK EU IN BR（可逗号分隔）",
+    )
+    parser.add_argument(
+        "--literature-sources", type=str, nargs="+", default=None,
+        choices=["arxiv", "scopus", "springer"],
+        help="literature 专用：要同步的文献源",
+    )
+    parser.add_argument(
+        "--skip-prefilter", action="store_true",
+        help="policy 专用：跳过 AI 关键词预筛（调试）",
     )
     parser.add_argument("--section", type=str, default="", help="版块过滤，仅 guardian 有效")
     parser.add_argument("--query", type=str, default="", help="覆盖默认检索词，guardian/nyt 有效")
@@ -183,6 +248,10 @@ def main() -> int:
         return _run_sina_tech(args)
     elif args.source == "wechat_rss":
         return _run_wechat_rss(args)
+    elif args.source == "policy":
+        return _run_policy(args)
+    elif args.source == "literature":
+        return _run_literature(args)
     else:
         print(f"未知信源: {args.source}", file=sys.stderr)
         return 1

@@ -25,3 +25,5 @@ class SessionKeys:
     """主导航水平 `st.radio` 的控件 key。"""
     SELECTED_RESEARCH_REPORT_ID = "selected_research_report_id"
     """深度调研页：用户点击「载入所选报告」后要展示的报告主键。"""
+    TRACK_SYSTEM = "track_system"
+    """专项监测当前子系统：None=Hub；policy/meeting/literature=子系统页。"""

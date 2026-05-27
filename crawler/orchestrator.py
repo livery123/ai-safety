@@ -7,6 +7,8 @@
   - async_sync_xinhua_tech / sync_xinhua_tech：新华网科技频道同步流水线。
   - async_sync_sina_tech / sync_sina_tech：新浪科技频道同步流水线。
   - async_sync_wechat_rss / sync_wechat_rss：微信公众号 RSS（wechat2rss）同步流水线。
+  - async_sync_policy / sync_policy：多国政策/法规源同步流水线（进 articles + LLM 抽取）。
+  - sync_literature：arXiv / Scopus / Springer 文献入库（literature_items，不跑 LLM）。
   各信源共用去重、并发 LLM 抽取、RAG 精炼、MySQL/Chroma 写入逻辑；
   _persist_mysql_phase1 接受 source 参数，正确标注数据来源。
   所有 async_sync_* 均支持 dry_run=True，可完整走抽取流程但跳过 MySQL/Chroma 写入，用于测试。
@@ -19,6 +21,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,6 +54,14 @@ from crawler.sources.sina_tech import (
     search_sina_tech_articles_multipage,
 )
 from crawler.sources.wechat2rss import fetch_wechat_pool
+from crawler.sources.policy import fetch_policy_articles
+from crawler.sources.literature import (
+    LiteratureItem,
+    fetch_arxiv_literature,
+    fetch_scopus_literature,
+    fetch_springer_literature,
+    parse_literature_published_at,
+)
 # engine.rag_ingestion 依赖 chromadb（可选安装），延迟到运行时导入，
 # 避免仅 import orchestrator 就要求 chromadb 存在。
 
@@ -96,9 +107,11 @@ def _persist_mysql_phase1(
             "%Y-%m-%dT%H:%M:%S",   # ISO 无时区 / Guardian Z 结尾截取前19
             "%Y-%m-%d %H:%M:%S",   # 新华/新浪空格格式含秒
             "%Y-%m-%d %H:%M",      # 新华/新浪空格格式不含秒
+            "%Y-%m-%d",            # 政策源等仅日期
         ):
             try:
-                dt = datetime.strptime(raw_date[:19], fmt)
+                slice_len = 19 if "H" in fmt else 10
+                dt = datetime.strptime(raw_date[:slice_len], fmt)
                 published_at = dt
                 break
             except ValueError:
@@ -1043,3 +1056,342 @@ def sync_wechat_rss(
             dry_run=dry_run,
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# 政策/法规源同步（进 articles + LLM 抽取）
+# ---------------------------------------------------------------------------
+
+POLICY_AI_KEYWORDS: Tuple[str, ...] = (
+    "artificial intelligence",
+    " ai ",
+    "algorithm",
+    "automated decision",
+    "machine learning",
+    "generative",
+    "large language model",
+    " llm",
+    "data protection",
+    "cyber",
+    "cybersecurity",
+    "deepfake",
+    "facial recognition",
+    "automation",
+    "robot",
+    "neural network",
+    "model risk",
+    "chatbot",
+    "foundation model",
+)
+
+
+def _policy_prefilter_relevant(art: RawArticle) -> bool:
+    """政策源预筛：标题/摘要/正文含 AI 治理相关关键词才进入 LLM。"""
+    text = f"{art.title} {art.trail_text or ''} {art.body_text or ''}".lower()
+    return any(kw in text for kw in POLICY_AI_KEYWORDS)
+
+
+def _policy_source_tag(art: RawArticle) -> str:
+    """从 section_name 解析 source 标签，如 policy:US。"""
+    section = art.section_name or ""
+    m = re.search(r"Policy\s*/\s*(\w+)", section, re.I)
+    if m:
+        return f"policy:{m.group(1).upper()}"
+    return "policy"
+
+
+async def async_sync_policy(
+    *,
+    countries: Optional[List[str]] = None,
+    max_articles_per_country: int = 15,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    rag_enabled: Optional[bool] = None,
+    concurrency: int = EXTRACT_CONCURRENCY,
+    force_reindex: bool = False,
+    dry_run: bool = False,
+    skip_prefilter: bool = False,
+) -> SyncResult:
+    """
+    功能：多国政策/法规源同步 → LLM 抽取 → articles 入库。
+    输入：countries 默认全池；skip_prefilter 跳过 AI 关键词预筛（调试用）。
+    输出：SyncResult；source 为 policy:US 等。
+    上下游：sync_policy、ui_jobs、scripts/sync_sources.py。
+    """
+    result = SyncResult()
+    log = result.debug_log
+    llm_backend = _build_llm_backend(api_key, base_url)
+    dry_tag = " [DRY-RUN，不入库]" if dry_run else ""
+    countries_desc = "、".join(countries) if countries else "US/UK/EU/IN/BR"
+
+    try:
+        log.append(
+            f"📡 拉取政策源（国家：{countries_desc}，每国≤{max_articles_per_country}）{dry_tag}"
+        )
+        fetch_result = await asyncio.to_thread(
+            fetch_policy_articles,
+            countries=countries,
+            max_articles_per_country=max_articles_per_country,
+        )
+        articles = fetch_result.articles
+        for err in fetch_result.errors:
+            log.append(f"⚠️ 政策源部分失败: {err}")
+        log.append(f"✓ 拉取到 {len(articles)} 条")
+        if not articles and fetch_result.errors:
+            log.append("❌ 所有选定国家政策源均失败")
+            result.failed += 1
+            return result
+    except Exception as e:
+        log.append(f"❌ 抓取异常: {type(e).__name__}: {e}")
+        result.failed += 1
+        return result
+
+    seen_urls: set[str] = set()
+    deduped: List[RawArticle] = []
+    for art in articles:
+        if not art.web_url or art.web_url in seen_urls:
+            continue
+        seen_urls.add(art.web_url)
+        if not skip_prefilter and not _policy_prefilter_relevant(art):
+            result.skipped_no_incident += 1
+            log.append(f"⏭ 预筛无关: {art.title[:55]}")
+            continue
+        if not dry_run and _url_already_in_mysql(art.web_url):
+            result.skipped_url_dup += 1
+            log.append(f"⏭ 已存在，跳过: {art.title[:55]}")
+            continue
+        deduped.append(art)
+    log.append(f"✓ 去重/预筛后待 LLM 处理 {len(deduped)} 篇")
+
+    if not deduped:
+        log.append("💡 本次无新政策条目需要处理")
+        return result
+
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _extract_one(art: RawArticle) -> Tuple[RawArticle, Optional[Dict[str, Any]], List[str]]:
+        async with sem:
+            context = raw_article_to_llm_context(art)
+            article_dict, ext_log = await async_extract_article_from_text(
+                context,
+                source_url=art.web_url,
+                backend=llm_backend,
+            )
+        return art, article_dict, ext_log
+
+    log.append(f"🚀 并发抽取 {len(deduped)} 篇（并发上限 {concurrency}）{dry_tag}...")
+    extract_results = await asyncio.gather(*[_extract_one(a) for a in deduped], return_exceptions=False)
+
+    for art, article_dict, ext_log in extract_results:
+        log.extend(ext_log)
+        if not article_dict or not article_dict.get("is_relevant"):
+            result.skipped_no_incident += 1
+            if dry_run and article_dict:
+                log.append(
+                    f"  ⛔ 无关: {art.title[:50]} | reason={article_dict.get('reject_reason', '')}"
+                )
+            continue
+        if dry_run:
+            log.append(f"  ✅ [DRY] {art.title[:50]}")
+            log.append(f"     source        : {_policy_source_tag(art)}")
+            log.append(f"     content_type  : {article_dict.get('content_type')}")
+            log.append(f"     risk_domain   : {str(article_dict.get('risk_domain', ''))[:60]}")
+            result.saved += 1
+            continue
+
+        incident_like = article_dict_to_incident_like(article_dict)
+        try:
+            from engine.rag_ingestion import apply_rag_to_incidents as _rag
+            incidents_rag, rag_log = _rag(
+                [incident_like],
+                llm_backend=llm_backend,
+                enabled=rag_enabled,
+            )
+        except ImportError:
+            incidents_rag = [incident_like]
+            rag_log = ["⚠️ chromadb 未安装，RAG 步骤跳过"]
+        log.extend(rag_log)
+        inc_rag = incidents_rag[0] if incidents_rag else incident_like
+        merged = merge_article_with_rag(article_dict, inc_rag)
+        _persist_mysql_phase1(
+            art, merged, result, llm_backend=llm_backend,
+            source=_policy_source_tag(art), force_reindex=force_reindex,
+        )
+
+    if dry_run:
+        log.append(
+            f"✅ DRY-RUN 完成 | 相关抽取 {result.saved} 条，"
+            f"预筛/无关 {result.skipped_no_incident}，失败 {result.failed}（均未入库）"
+        )
+    else:
+        log.append(
+            f"✅ 完成 | 入库 {result.saved} 条，跳过已有 {result.skipped_url_dup}，"
+            f"预筛/无关 {result.skipped_no_incident}，失败 {result.failed}"
+        )
+    return result
+
+
+def sync_policy(
+    *,
+    countries: Optional[List[str]] = None,
+    max_articles_per_country: int = 15,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    rag_enabled: Optional[bool] = None,
+    concurrency: int = EXTRACT_CONCURRENCY,
+    force_reindex: bool = False,
+    dry_run: bool = False,
+    skip_prefilter: bool = False,
+) -> SyncResult:
+    """sync_policy 是 async_sync_policy 的同步包装。"""
+    return asyncio.run(
+        async_sync_policy(
+            countries=countries,
+            max_articles_per_country=max_articles_per_country,
+            api_key=api_key,
+            base_url=base_url,
+            rag_enabled=rag_enabled,
+            concurrency=concurrency,
+            force_reindex=force_reindex,
+            dry_run=dry_run,
+            skip_prefilter=skip_prefilter,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# 文献资料库（arXiv / Scopus / Springer → literature_items）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LiteratureSyncResult:
+    """文献同步结果摘要。"""
+
+    saved: int = 0
+    skipped_url_dup: int = 0
+    failed: int = 0
+    debug_log: List[str] = field(default_factory=list)
+
+
+def _literature_field_ok(item: LiteratureItem) -> Dict[str, bool]:
+    return {
+        "url": bool(item.url),
+        "title": bool(item.title),
+        "abstract_or_meta": bool(item.abstract or item.publication_name or item.doi),
+        "published_at": bool(item.published_at),
+    }
+
+
+def _persist_literature_item(item: LiteratureItem, result: LiteratureSyncResult) -> None:
+    try:
+        from core.mysql_db import get_literature_by_url, normalize_url, save_literature_item
+    except Exception as e:
+        result.debug_log.append(f"⚠️ literature_items 未启用: {type(e).__name__}: {e}")
+        result.failed += 1
+        return
+
+    if get_literature_by_url(normalize_url(item.url)):
+        result.skipped_url_dup += 1
+        return
+
+    try:
+        save_literature_item(
+            url=item.url,
+            source=item.source,
+            title=item.title,
+            abstract=item.abstract or "",
+            authors=item.authors,
+            doi=item.doi or "",
+            external_id=item.external_id or "",
+            publication_name=item.publication_name or "",
+            document_type=item.document_type or "",
+            subject_area=item.subject_area or "",
+            published_at=parse_literature_published_at(item.published_at),
+            pdf_url=item.pdf_url or "",
+            raw_metadata=item.raw_metadata,
+        )
+        result.saved += 1
+    except Exception as e:
+        result.failed += 1
+        result.debug_log.append(f"⚠️ 文献入库失败 [{item.title[:40]}]: {type(e).__name__}: {e}")
+
+
+def sync_literature(
+    *,
+    sources: Optional[List[str]] = None,
+    max_arxiv_per_category: int = 3,
+    arxiv_categories: Optional[List[str]] = None,
+    max_springer_per_domain: int = 3,
+    springer_domains: Optional[List[str]] = None,
+    scopus_max_results: int = 10,
+    scopus_days_back: int = 7,
+    dry_run: bool = False,
+) -> LiteratureSyncResult:
+    """
+    功能：拉取 arXiv/Scopus/Springer 并写入 literature_items（不跑 LLM）。
+    输入：sources 如 ['arxiv','springer']；dry_run 只打日志不入库。
+    输出：LiteratureSyncResult。
+    """
+    result = LiteratureSyncResult()
+    log = result.debug_log
+    selected = [s.strip().lower() for s in (sources or ["arxiv"]) if s.strip()]
+    dry_tag = " [DRY-RUN，不入库]" if dry_run else ""
+    all_items: List[LiteratureItem] = []
+
+    if "arxiv" in selected:
+        try:
+            items = fetch_arxiv_literature(
+                categories=arxiv_categories or ["cs.AI", "cs.CL"],
+                max_articles_per_category=max_arxiv_per_category,
+            )
+            log.append(f"✓ arXiv 拉取 {len(items)} 条")
+            all_items.extend(items)
+        except Exception as e:
+            log.append(f"❌ arXiv 失败: {type(e).__name__}: {e}")
+            result.failed += 1
+
+    if "springer" in selected:
+        try:
+            items = fetch_springer_literature(
+                domains=springer_domains or ["Machine Learning", "Artificial Intelligence"],
+                max_articles_per_domain=max_springer_per_domain,
+            )
+            log.append(f"✓ Springer 拉取 {len(items)} 条")
+            all_items.extend(items)
+        except Exception as e:
+            log.append(f"❌ Springer 失败: {type(e).__name__}: {e}")
+            result.failed += 1
+
+    if "scopus" in selected:
+        try:
+            items = fetch_scopus_literature(
+                days_back=scopus_days_back,
+                max_results=scopus_max_results,
+            )
+            log.append(f"✓ Scopus 拉取 {len(items)} 条")
+            all_items.extend(items)
+        except Exception as e:
+            log.append(f"❌ Scopus 失败: {type(e).__name__}: {e}")
+            result.failed += 1
+
+    log.append(f"📚 合计 {len(all_items)} 条待处理{dry_tag}")
+    for i, item in enumerate(all_items, 1):
+        fields = _literature_field_ok(item)
+        log.append(
+            f"  [{i}] {item.source} | {item.title[:50]} | "
+            f"url={fields['url']} meta={fields['abstract_or_meta']} date={fields['published_at']}"
+        )
+        if dry_run:
+            result.saved += 1
+            continue
+        _persist_literature_item(item, result)
+
+    if dry_run:
+        log.append(f"✅ DRY-RUN 完成 | 可入库 {result.saved} 条（未写入 literature_items）")
+    else:
+        log.append(
+            f"✅ 完成 | 新入库 {result.saved} 条，"
+            f"已有跳过 {result.skipped_url_dup}，失败 {result.failed}"
+        )
+    return result

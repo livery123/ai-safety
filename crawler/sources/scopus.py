@@ -8,7 +8,6 @@ into the shared RawArticle structure used by the crawler pipeline.
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -16,6 +15,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import httpx
 from pydantic import BaseModel, Field
+
+from core.config import SCOPUS_API_KEY
 
 
 class RawArticle(BaseModel):
@@ -45,7 +46,7 @@ class ScopusPage:
 class ScopusConfig:
     """Runtime configuration for Scopus API crawling."""
 
-    api_key: str = "0ca428eb9d1de051aad56aa2200f1fda"
+    api_key: str = ""
     base_url: str = "https://api.elsevier.com/content/search/scopus"
     query_keyword: str = "artificial intelligence"
     subject_area: Optional[str] = "COMP"
@@ -75,11 +76,10 @@ class ScopusSubscriber:
 
     @classmethod
     def from_env(cls) -> "ScopusSubscriber":
-        api_key = "0ca428eb9d1de051aad56aa2200f1fda"
+        api_key = (SCOPUS_API_KEY or "").strip()
         if not api_key:
             raise ScopusError(
-                "Missing SCOPUS_API_KEY environment variable. "
-                "Please set it before running the Scopus crawler."
+                "未配置 SCOPUS_API_KEY 环境变量，请先设置后再运行 Scopus 爬虫。"
             )
 
         return cls(ScopusConfig(api_key=api_key))
@@ -118,7 +118,12 @@ class ScopusSubscriber:
                     break
 
                 for entry in entries:
-                    article = self._parse_entry(entry, api_url=api_url)
+                    article = self._parse_entry(
+                        entry,
+                        api_url=api_url,
+                        download_date=download_date,
+                        client=client,
+                    )
 
                     if not article.web_url:
                         continue
@@ -258,7 +263,14 @@ class ScopusSubscriber:
         except (TypeError, ValueError):
             return 0
 
-    def _parse_entry(self, entry: Dict[str, Any], *, api_url: str) -> RawArticle:
+    def _parse_entry(
+        self,
+        entry: Dict[str, Any],
+        *,
+        api_url: str,
+        download_date: date,
+        client: httpx.Client,
+    ) -> RawArticle:
         title = self._truncate(self._get_string(entry, "dc:title"), 255) or "(no title)"
 
         doi = self._get_string(entry, "prism:doi")
@@ -274,6 +286,12 @@ class ScopusSubscriber:
         subtype = self._get_string(entry, "subtypeDescription")
 
         affiliations = self._extract_affiliations(entry)
+        publication_date = self._resolve_publication_date(
+            doi=doi,
+            cover_date=cover_date,
+            download_date=download_date,
+            client=client,
+        )
 
         metadata = self._build_metadata(
             doi=doi,
@@ -281,6 +299,8 @@ class ScopusSubscriber:
             article_type=article_type,
             subtype=subtype,
             affiliations=affiliations,
+            cover_date=cover_date,
+            publication_date=publication_date,
         )
 
         return RawArticle(
@@ -288,10 +308,79 @@ class ScopusSubscriber:
             title=title,
             trail_text=publication or None,
             body_text=metadata or None,
-            web_publication_date=cover_date or None,
+            web_publication_date=publication_date,
             section_name=f"Scopus / {publication}" if publication else "Scopus",
             api_url=api_url,
         )
+
+    def _resolve_publication_date(
+        self,
+        *,
+        doi: str,
+        cover_date: str,
+        download_date: date,
+        client: httpx.Client,
+    ) -> Optional[str]:
+        """
+        解析 Scopus 条目的发表日期。
+
+        Scopus Search API 仅返回 prism:coverDate（期刊封面日，常为未来期号），
+        与 ORIG-LOAD-DATE 筛选不一致。优先用 Crossref DOI 的 published-online。
+        """
+        if doi:
+            crossref_date = self._fetch_crossref_publication_date(client, doi)
+            if crossref_date:
+                return crossref_date
+
+        parsed_cover = self._parse_iso_date(cover_date)
+        if parsed_cover and parsed_cover <= download_date:
+            return parsed_cover.isoformat()
+        return None
+
+    @staticmethod
+    def _fetch_crossref_publication_date(client: httpx.Client, doi: str) -> Optional[str]:
+        """通过 Crossref 查询 DOI 的在线发表日（published-online / issued）。"""
+        doi = (doi or "").strip()
+        if not doi:
+            return None
+        try:
+            response = client.get(
+                f"https://api.crossref.org/works/{doi}",
+                timeout=10.0,
+                headers={"Accept": "application/json"},
+            )
+            if not response.is_success:
+                return None
+            message = response.json().get("message", {})
+            for key in ("published-online", "issued", "created", "published-print"):
+                date_parts = (message.get(key) or {}).get("date-parts")
+                if date_parts and date_parts[0]:
+                    parsed = ScopusSubscriber._date_parts_to_iso(date_parts[0])
+                    if parsed:
+                        return parsed
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _date_parts_to_iso(parts: List[Any]) -> Optional[str]:
+        try:
+            year = int(parts[0])
+            month = int(parts[1]) if len(parts) > 1 else 1
+            day = int(parts[2]) if len(parts) > 2 else 1
+            return date(year, month, day).isoformat()
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _parse_iso_date(value: str) -> Optional[date]:
+        value = (value or "").strip()
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
 
     @staticmethod
     def _extract_affiliations(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -314,11 +403,19 @@ class ScopusSubscriber:
         article_type: str,
         subtype: str,
         affiliations: List[Dict[str, Any]],
+        cover_date: str = "",
+        publication_date: Optional[str] = None,
     ) -> Optional[str]:
         parts: List[str] = []
 
         if doi:
             parts.append(f"DOI: {doi}")
+
+        if publication_date:
+            parts.append(f"Publication Date: {publication_date}")
+
+        if cover_date:
+            parts.append(f"Cover Date: {cover_date}")
 
         if publication:
             parts.append(f"Publication: {publication}")

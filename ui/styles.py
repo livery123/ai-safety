@@ -45,6 +45,86 @@ def inject_global_styles() -> None:
         margin-bottom: 16px;
         color: #c7d0e8;
     }
+    /* 专项监测 · 三系统 Hub 卡片 */
+    .track-hub-card {
+        border-radius: 12px;
+        padding: 22px 20px 18px;
+        margin-bottom: 12px;
+        min-height: 220px;
+        border: 1px solid #2a3563;
+    }
+    .track-hub-card-policy {
+        background: linear-gradient(145deg, #1a2744 0%, #1e3a5f55 100%);
+        border-left: 5px solid #2563eb;
+    }
+    .track-hub-card-meeting {
+        background: linear-gradient(145deg, #251a44 0%, #3b1f6e55 100%);
+        border-left: 5px solid #7c3aed;
+    }
+    .track-hub-card-literature {
+        background: linear-gradient(145deg, #142a24 0%, #064e3b55 100%);
+        border-left: 5px solid #059669;
+    }
+    .track-hub-card .sys-no { color: #8892b0; font-size: 12px; letter-spacing: 0.05em; }
+    .track-hub-card .sys-icon { font-size: 28px; margin: 8px 0 4px; }
+    .track-hub-card .sys-name { color: #e8eaf6; font-size: 17px; font-weight: 700; margin-bottom: 6px; }
+    .track-hub-card .sys-tagline { color: #a0aec0; font-size: 13px; line-height: 1.45; min-height: 38px; }
+    .track-hub-card .sys-stat { color: #c7d0e8; font-size: 13px; margin-top: 14px; }
+    .track-hub-card .sys-stat strong { color: #fff; font-size: 22px; }
+    /* 专项监测 · 子系统顶栏 */
+    .track-system-banner {
+        border-radius: 10px;
+        padding: 16px 20px;
+        margin-bottom: 16px;
+        border: 1px solid #2a3563;
+    }
+    .track-banner-policy {
+        background: linear-gradient(90deg, #1e3a5f44 0%, transparent 70%);
+        border-left: 5px solid #2563eb;
+    }
+    .track-banner-meeting {
+        background: linear-gradient(90deg, #3b1f6e44 0%, transparent 70%);
+        border-left: 5px solid #7c3aed;
+    }
+    .track-banner-literature {
+        background: linear-gradient(90deg, #064e3b44 0%, transparent 70%);
+        border-left: 5px solid #059669;
+    }
+    .track-system-banner .banner-no { color: #8892b0; font-size: 12px; }
+    .track-system-banner .banner-title { color: #e8eaf6; font-size: 20px; font-weight: 700; margin: 4px 0; }
+    .track-system-banner .banner-tagline { color: #a0aec0; font-size: 13px; }
+    /* 专项监测 · 左侧系统切换 */
+    .track-switch-item {
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 6px;
+        border: 1px solid transparent;
+        cursor: default;
+    }
+    .track-switch-item.active-policy {
+        background: #2563eb22;
+        border-color: #2563eb;
+    }
+    .track-switch-item.active-meeting {
+        background: #7c3aed22;
+        border-color: #7c3aed;
+    }
+    .track-switch-item.active-literature {
+        background: #05966922;
+        border-color: #059669;
+    }
+    .track-switch-item.inactive { background: #1a1f2e; border-color: #2a3563; opacity: 0.75; }
+    .track-switch-item .sw-no { font-size: 11px; color: #8892b0; }
+    .track-switch-item .sw-name { font-size: 14px; color: #e8eaf6; font-weight: 600; }
+    .track-summary-box {
+        background: #1a1f35;
+        border: 1px solid #2a3563;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-bottom: 12px;
+    }
+    .track-summary-box ul { margin: 8px 0 0; padding-left: 18px; color: #c7d0e8; font-size: 13px; }
+    .track-summary-box li { margin-bottom: 4px; }
     </style>
     """,
         unsafe_allow_html=True,

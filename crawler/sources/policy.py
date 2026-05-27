@@ -1,18 +1,17 @@
 """
 Policy crawler.
 
-Fetches policy documents from several public policy/legal sources and maps
-them into the shared RawArticle structure used by the crawler pipeline.
+功能：从多国公开政策/法规站点抓取条目，映射为 RawArticle，供 orchestrator 入库与 LLM 抽取。
+输入：国家列表、每国条数上限、download_date。
+输出：PolicyFetchResult（articles + 各国错误列表）；副作用：HTTP 请求。
+上下游：crawler.orchestrator.async_sync_policy；下游 articles 表。
 
-Sources:
+信源：
 - US: Federal Register RSS
-- UK: legislation.gov.uk RSS
+- UK: GOV.UK Atom（主）；legislation.gov.uk 在 437 等阻断时自动降级
 - EU: EUR-Lex daily view
 - India: PRS India bill track
 - Brazil: LexML search
-
-This module does not write to DB. Deduplication and persistence should be
-handled by the outer crawler pipeline.
 """
 
 from __future__ import annotations
@@ -20,8 +19,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Iterable, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -29,24 +28,20 @@ from urllib.parse import urljoin
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, Field
+
+from crawler.sources.guardian import RawArticle
 
 
-class RawArticle(BaseModel):
-    """Shared raw article structure for crawler pipeline."""
-
-    web_url: str = Field(..., description="原始文章链接")
-    title: str = Field(..., description="原始文章标题")
-    trail_text: Optional[str] = Field(None, description="原始导语或摘要")
-    body_text: Optional[str] = Field(None, description="原始正文全文")
-    web_publication_date: Optional[str] = Field(None, description="原始发布时间")
-    section_name: Optional[str] = Field(None, description="所属新闻版块")
-    api_url: Optional[str] = Field(None, description="API 请求链接")
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 @dataclass(frozen=True)
 class PolicyPage:
-    """Result returned by policy crawling."""
+    """单国政策抓取结果。"""
 
     articles: List[RawArticle]
     article_urls: List[str]
@@ -56,21 +51,34 @@ class PolicyPage:
 
 
 @dataclass(frozen=True)
+class PolicyFetchResult:
+    """
+    功能：多国政策抓取汇总。
+    输入：由 fetch_policy_articles 构造。
+    输出：articles 与 errors（某国失败不影响他国）。
+    """
+
+    articles: List[RawArticle]
+    errors: List[str] = field(default_factory=list)
+    page_urls: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class PolicyConfig:
     """Runtime configuration for policy crawling."""
 
-    timeout_sec: float = 30.0
+    timeout_sec: float = 45.0
     retry_count: int = 3
     retry_delay_sec: float = 3.0
-    page_delay_sec: float = 1.0
+    page_delay_sec: float = 0.5
     eu_days_back: int = 3
     brazil_start_days_back: int = 5
     brazil_end_days_back: int = 9
-    brazil_max_offsets_per_day: int = 10
-    user_agent: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36"
-    )
+    brazil_max_offsets_per_day: int = 3
+    brazil_lookback_days: int = 120
+    max_articles_per_country: int = 30
+    user_agent: str = DEFAULT_USER_AGENT
+    fetch_eu_full_text: bool = True
 
 
 class PolicyError(Exception):
@@ -88,6 +96,14 @@ class PolicySubscriber:
 
     FEDERAL_REGISTER_RSS = "https://www.federalregister.gov/api/v1/documents.rss"
     UK_LEGISLATION_RSS = "https://www.legislation.gov.uk/new/data.feed"
+    UK_GOVUK_POLICY_ATOM = (
+        "https://www.gov.uk/search/policy-papers-and-consultations.atom?order=updated-newest"
+    )
+    UK_GOVUK_AI_ATOM = (
+        "https://www.gov.uk/search/policy-papers-and-consultations.atom"
+        "?keywords=artificial+intelligence"
+        "&order=updated-newest"
+    )
     EUR_LEX_BASE = "https://eur-lex.europa.eu"
     PRS_BILL_TRACK_URL = "https://prsindia.org/billtrack"
     PRS_BASE = "https://prsindia.org"
@@ -101,51 +117,47 @@ class PolicySubscriber:
         *,
         countries: Optional[Iterable[str]] = None,
         download_date: Optional[date] = None,
-    ) -> PolicyPage:
+    ) -> PolicyFetchResult:
         """
-        Crawl multiple policy sources and merge results.
-
-        Example:
-            subscriber.subscribe(countries=["US", "EU"])
+        功能：按国家依次抓取并合并；单国失败记 errors 并继续。
+        输入：countries 默认全池；download_date 默认今天。
+        输出：PolicyFetchResult。
         """
         selected_countries = list(countries or self.DEFAULT_COUNTRIES)
         download_date = download_date or date.today()
 
         all_articles: List[RawArticle] = []
-        all_urls: List[str] = []
         all_page_urls: List[str] = []
-
-        latest_status_code = 200
+        errors: List[str] = []
         seen_urls: set[str] = set()
 
         with self._new_http_client() as client:
             for country in selected_countries:
-                page = self.subscribe_country(
-                    client=client,
-                    country=country,
-                    download_date=download_date,
-                )
+                code = country.upper()
+                try:
+                    page = self.subscribe_country(
+                        client=client,
+                        country=code,
+                        download_date=download_date,
+                    )
+                except PolicyError as exc:
+                    errors.append(f"{code}: {exc}")
+                    continue
+                except Exception as exc:
+                    errors.append(f"{code}: {type(exc).__name__}: {exc}")
+                    continue
 
-                latest_status_code = page.status_code
                 all_page_urls.append(page.page_url)
-
                 for article in page.articles:
-                    if not article.web_url:
+                    if not article.web_url or article.web_url in seen_urls:
                         continue
-
-                    if article.web_url in seen_urls:
-                        continue
-
                     seen_urls.add(article.web_url)
                     all_articles.append(article)
-                    all_urls.append(article.web_url)
 
-        return PolicyPage(
+        return PolicyFetchResult(
             articles=all_articles,
-            article_urls=all_urls,
-            page_url=",".join(all_page_urls),
-            status_code=latest_status_code,
-            country=None,
+            errors=errors,
+            page_urls=all_page_urls,
         )
 
     def subscribe_country(
@@ -179,57 +191,112 @@ class PolicySubscriber:
     # ------------------------------------------------------------------
 
     def subscribe_us(self, *, client: httpx.Client) -> PolicyPage:
-        rss_text, status_code = self._request_text_with_retry(
-            client,
-            self.FEDERAL_REGISTER_RSS,
-        )
-
-        feed = feedparser.parse(rss_text)
-        articles = [
-            self._parse_rss_entry(
-                entry,
-                country="US",
-                section_name="Policy / US / Federal Register",
-                api_url=self.FEDERAL_REGISTER_RSS,
-            )
-            for entry in feed.entries
-        ]
-
-        return PolicyPage(
-            articles=articles,
-            article_urls=[article.web_url for article in articles],
-            page_url=self.FEDERAL_REGISTER_RSS,
-            status_code=status_code,
+        return self._subscribe_feed(
+            client=client,
+            feed_url=self.FEDERAL_REGISTER_RSS,
             country="US",
+            section_name="Policy / US / Federal Register",
         )
 
     # ------------------------------------------------------------------
-    # UK: legislation.gov.uk RSS
+    # UK: GOV.UK Atom（legislation.gov.uk 常被 437 阻断）
     # ------------------------------------------------------------------
 
     def subscribe_uk(self, *, client: httpx.Client) -> PolicyPage:
-        rss_text, status_code = self._request_text_with_retry(
-            client,
-            self.UK_LEGISLATION_RSS,
+        """
+        功能：拉取英国政策条目。
+        优先 legislation.gov.uk；若 HTTP 437/403 等则改用 GOV.UK Atom。
+        """
+        try:
+            return self._subscribe_feed(
+                client=client,
+                feed_url=self.UK_LEGISLATION_RSS,
+                country="UK",
+                section_name="Policy / UK / legislation.gov.uk",
+            )
+        except PolicyError as exc:
+            blocked = exc.status_code in {403, 429, 437} or "437" in str(exc)
+            if not blocked:
+                raise
+
+        articles: List[RawArticle] = []
+        page_urls: List[str] = []
+        latest_status = 200
+        seen: set[str] = set()
+
+        for feed_url, section in (
+            (self.UK_GOVUK_AI_ATOM, "Policy / UK / GOV.UK AI"),
+            (self.UK_GOVUK_POLICY_ATOM, "Policy / UK / GOV.UK Policy"),
+        ):
+            page = self._subscribe_feed(
+                client=client,
+                feed_url=feed_url,
+                country="UK",
+                section_name=section,
+                limit_remaining=max(0, self.config.max_articles_per_country - len(articles)),
+            )
+            page_urls.append(page.page_url)
+            latest_status = page.status_code
+            for art in page.articles:
+                if art.web_url in seen:
+                    continue
+                seen.add(art.web_url)
+                articles.append(art)
+                if len(articles) >= self.config.max_articles_per_country:
+                    break
+            if len(articles) >= self.config.max_articles_per_country:
+                break
+
+        if not articles:
+            raise PolicyError(
+                "UK policy feeds unavailable (legislation.gov.uk blocked and GOV.UK empty)"
+            )
+
+        return PolicyPage(
+            articles=articles,
+            article_urls=[a.web_url for a in articles],
+            page_url=",".join(page_urls),
+            status_code=latest_status,
+            country="UK",
         )
 
+    def _subscribe_feed(
+        self,
+        *,
+        client: httpx.Client,
+        feed_url: str,
+        country: str,
+        section_name: str,
+        limit_remaining: Optional[int] = None,
+    ) -> PolicyPage:
+        """通用 RSS/Atom 订阅：拉 feed 并解析为 RawArticle。"""
+        rss_text, status_code = self._request_text_with_retry(client, feed_url)
         feed = feedparser.parse(rss_text)
+        if getattr(feed, "bozo", False) and not feed.entries:
+            raise PolicyError(
+                f"Failed to parse feed {feed_url}: {getattr(feed, 'bozo_exception', '')}"
+            )
+
+        cap = limit_remaining if limit_remaining is not None else self.config.max_articles_per_country
+        cap = max(0, int(cap))
+        entries = list(feed.entries)[:cap] if cap else []
+
         articles = [
             self._parse_rss_entry(
                 entry,
-                country="UK",
-                section_name="Policy / UK / legislation.gov.uk",
-                api_url=self.UK_LEGISLATION_RSS,
+                country=country,
+                section_name=section_name,
+                api_url=feed_url,
             )
-            for entry in feed.entries
+            for entry in entries
         ]
 
         return PolicyPage(
             articles=articles,
             article_urls=[article.web_url for article in articles],
-            page_url=self.UK_LEGISLATION_RSS,
+            page_url=feed_url,
             status_code=status_code,
-            country="UK",
+            country=country,
         )
 
     # ------------------------------------------------------------------
@@ -245,8 +312,12 @@ class PolicySubscriber:
         articles: List[RawArticle] = []
         page_urls: List[str] = []
         latest_status_code = 200
+        cap = max(0, int(self.config.max_articles_per_country))
 
         for offset in range(1, self.config.eu_days_back + 1):
+            if len(articles) >= cap:
+                break
+
             target_date = download_date - timedelta(days=offset)
             oj_date = target_date.strftime("%d%m%Y")
             pub_date = target_date.isoformat()
@@ -267,14 +338,15 @@ class PolicySubscriber:
                     client=client,
                     page_url=page_url,
                     pub_date=pub_date,
+                    max_items=cap - len(articles),
                 )
             )
 
             time.sleep(max(0.0, self.config.page_delay_sec))
 
         return PolicyPage(
-            articles=articles,
-            article_urls=[article.web_url for article in articles],
+            articles=articles[:cap],
+            article_urls=[article.web_url for article in articles[:cap]],
             page_url=",".join(page_urls),
             status_code=latest_status_code,
             country="EU",
@@ -287,15 +359,24 @@ class PolicySubscriber:
         client: httpx.Client,
         page_url: str,
         pub_date: str,
+        max_items: int,
     ) -> List[RawArticle]:
         articles: List[RawArticle] = []
+        if max_items <= 0:
+            return articles
 
         for panel in soup.select("div.panel"):
+            if len(articles) >= max_items:
+                break
+
             policy_type = self._clean_text(
                 panel.select_one("button").get_text(" ")
             ) if panel.select_one("button") else ""
 
             for row in panel.select("div.daily-view-row-spacing"):
+                if len(articles) >= max_items:
+                    break
+
                 link_node = row.select_one("a")
                 if not link_node:
                     continue
@@ -307,17 +388,20 @@ class PolicySubscriber:
                     continue
 
                 full_url = urljoin(self.EUR_LEX_BASE, href)
-                summary = self._fetch_eu_summary(client, full_url)
+                summary = ""
+                if self.config.fetch_eu_full_text:
+                    summary = self._fetch_eu_summary(client, full_url)
 
                 articles.append(
                     RawArticle(
                         web_url=full_url,
                         title=title,
                         trail_text=summary or None,
-                        body_text=summary or None,
+                        body_text=summary or title,
                         web_publication_date=pub_date,
                         section_name=f"Policy / EU / {policy_type}" if policy_type else "Policy / EU",
                         api_url=page_url,
+                        guardian_id=None,
                     )
                 )
 
@@ -325,7 +409,7 @@ class PolicySubscriber:
 
     def _fetch_eu_summary(self, client: httpx.Client, url: str) -> str:
         try:
-            html, _ = self._request_text_with_retry(client, url)
+            html, _ = self._request_text(client, url)
         except Exception:
             return ""
 
@@ -349,8 +433,12 @@ class PolicySubscriber:
 
         soup = BeautifulSoup(html, "html.parser")
         articles: List[RawArticle] = []
+        cap = max(0, int(self.config.max_articles_per_country))
 
         for row in soup.select("#parliament_view div.views-row"):
+            if len(articles) >= cap:
+                break
+
             status = self._clean_text(
                 row.select_one(".views-field-field-bill-status").get_text(" ")
             ) if row.select_one(".views-field-field-bill-status") else ""
@@ -377,7 +465,8 @@ class PolicySubscriber:
                 )
             )
 
-            time.sleep(max(0.0, self.config.page_delay_sec))
+            if len(articles) < cap:
+                time.sleep(max(0.0, self.config.page_delay_sec))
 
         return PolicyPage(
             articles=articles,
@@ -399,7 +488,7 @@ class PolicySubscriber:
         pub_date: Optional[str] = None
 
         try:
-            html, _ = self._request_text_with_retry(client, url)
+            html, _ = self._request_text(client, url)
             soup = BeautifulSoup(html, "html.parser")
 
             ministry_node = soup.select_one(".field-name-field-ministry")
@@ -425,18 +514,19 @@ class PolicySubscriber:
             source="PRS India",
         )
 
-        body_text = summary
+        body_text = summary or title
         if metadata:
             body_text = f"{summary}\n\n{metadata}" if summary else metadata
 
         return RawArticle(
             web_url=url,
             title=title,
-            trail_text=summary or None,
+            trail_text=summary or title,
             body_text=body_text or None,
             web_publication_date=pub_date,
             section_name="Policy / India / PRS",
             api_url=self.PRS_BILL_TRACK_URL,
+            guardian_id=None,
         )
 
     # ------------------------------------------------------------------
@@ -449,52 +539,58 @@ class PolicySubscriber:
         client: httpx.Client,
         download_date: date,
     ) -> PolicyPage:
+        """
+        功能：LexML 立法检索（按更新时间倒序分页，客户端按日期过滤）。
+        LexML 的 f3-date 过滤器对近几日条目常返回空，故不用该参数。
+        """
         articles: List[RawArticle] = []
         page_urls: List[str] = []
         latest_status_code = 200
+        cap = max(0, int(self.config.max_articles_per_country))
+        cutoff = download_date - timedelta(days=max(7, int(self.config.brazil_lookback_days)))
 
-        for days_back in range(
-            self.config.brazil_start_days_back,
-            self.config.brazil_end_days_back + 1,
-        ):
-            target_date = download_date - timedelta(days=days_back)
-            decade = (target_date.year // 10) * 10
-            date_param = f"{decade}s::{target_date.strftime('%Y::%m::%d')}"
+        offset = 1
+        offset_count = 0
 
-            offset = 1
-            offset_count = 0
+        while offset_count < self.config.brazil_max_offsets_per_day:
+            if len(articles) >= cap:
+                break
 
-            while offset_count < self.config.brazil_max_offsets_per_day:
-                page_url = (
-                    f"{self.LEXML_BASE}/busca/search"
-                    f"?sort=reverse-year"
-                    f";f2-tipoDocumento=Legisla%C3%A7%C3%A3o"
-                    f";f3-date={date_param}"
-                    f";startDoc={offset}"
-                )
-                page_urls.append(page_url)
+            page_url = (
+                f"{self.LEXML_BASE}/busca/search"
+                f"?sort=reverse-year"
+                f";f2-tipoDocumento=Legisla%C3%A7%C3%A3o"
+                f";startDoc={offset}"
+            )
+            page_urls.append(page_url)
 
-                html, status_code = self._request_text_with_retry(client, page_url)
-                latest_status_code = status_code
+            html, status_code = self._request_text_with_retry(client, page_url)
+            latest_status_code = status_code
 
-                soup = BeautifulSoup(html, "html.parser")
-                hits = soup.select("div.docHit")
+            soup = BeautifulSoup(html, "html.parser")
+            hits = soup.select("div.docHit")
 
-                if not hits:
+            if not hits:
+                break
+
+            for hit in hits:
+                if len(articles) >= cap:
                     break
+                article = self._parse_brazil_hit(hit, fallback_date=download_date)
+                if not article:
+                    continue
+                pub = self._parse_date(article.web_publication_date or "")
+                if pub and pub < cutoff:
+                    continue
+                articles.append(article)
 
-                for hit in hits:
-                    article = self._parse_brazil_hit(hit, fallback_date=target_date)
-                    if article:
-                        articles.append(article)
-
-                offset += 20
-                offset_count += 1
-                time.sleep(max(0.0, self.config.page_delay_sec))
+            offset += 20
+            offset_count += 1
+            time.sleep(max(0.0, self.config.page_delay_sec))
 
         return PolicyPage(
-            articles=articles,
-            article_urls=[article.web_url for article in articles],
+            articles=articles[:cap],
+            article_urls=[article.web_url for article in articles[:cap]],
             page_url=",".join(page_urls),
             status_code=latest_status_code,
             country="BR",
@@ -545,18 +641,19 @@ class PolicySubscriber:
             source="LexML",
         )
 
-        body_text = summary
+        body_text = summary or title
         if metadata:
             body_text = f"{summary}\n\n{metadata}" if summary else metadata
 
         return RawArticle(
             web_url=url,
             title=title,
-            trail_text=summary or None,
+            trail_text=summary or title,
             body_text=body_text or None,
             web_publication_date=pub_date.isoformat(),
             section_name="Policy / Brazil / LexML",
             api_url=None,
+            guardian_id=None,
         )
 
     # ------------------------------------------------------------------
@@ -572,7 +669,7 @@ class PolicySubscriber:
         api_url: str,
     ) -> RawArticle:
         title = self._clean_text(getattr(entry, "title", "")) or "(no title)"
-        url = getattr(entry, "link", "") or api_url
+        url = self._entry_link(entry, fallback=api_url)
 
         summary = (
             getattr(entry, "summary", None)
@@ -585,7 +682,7 @@ class PolicySubscriber:
         if hasattr(entry, "author"):
             author = self._clean_text(entry.author)
 
-        pub_date = self._extract_rss_date(entry)
+        pub_date = self._extract_feed_date(entry)
 
         metadata = self._build_metadata(
             country=country,
@@ -593,33 +690,51 @@ class PolicySubscriber:
             source=section_name,
         )
 
-        body_text = summary
+        body_text = summary or title
         if metadata:
             body_text = f"{summary}\n\n{metadata}" if summary else metadata
 
         return RawArticle(
             web_url=url,
             title=title,
-            trail_text=summary or None,
+            trail_text=summary or title,
             body_text=body_text or None,
             web_publication_date=pub_date,
             section_name=section_name,
             api_url=api_url,
+            guardian_id=None,
         )
 
     @staticmethod
-    def _extract_rss_date(entry) -> Optional[str]:
-        for key in ("published", "updated"):
+    def _entry_link(entry, *, fallback: str) -> str:
+        """从 RSS/Atom entry 提取 canonical 链接。"""
+        link = getattr(entry, "link", "") or ""
+        if isinstance(link, str) and link.strip():
+            return link.strip()
+
+        for item in getattr(entry, "links", []) or []:
+            rel = (item.get("rel") or "").lower()
+            href = (item.get("href") or "").strip()
+            if href and rel in {"alternate", "self", ""}:
+                return href
+
+        entry_id = getattr(entry, "id", "") or ""
+        if isinstance(entry_id, str) and entry_id.startswith("http"):
+            return entry_id.strip()
+
+        return fallback
+
+    @classmethod
+    def _extract_feed_date(cls, entry) -> Optional[str]:
+        """解析 RSS/Atom 发布时间（RFC822 或 ISO8601）。"""
+        for key in ("published", "updated", "created", "issued"):
             value = getattr(entry, key, None)
             if not value:
                 continue
 
-            try:
-                return parsedate_to_datetime(value).date().isoformat()
-            except Exception:
-                parsed = PolicySubscriber._parse_date(value)
-                if parsed:
-                    return parsed.isoformat()
+            parsed = cls._parse_date(str(value))
+            if parsed:
+                return parsed.isoformat()
 
         return None
 
@@ -627,7 +742,14 @@ class PolicySubscriber:
         return httpx.Client(
             timeout=self.config.timeout_sec,
             follow_redirects=True,
-            headers={"User-Agent": self.config.user_agent},
+            headers={
+                "User-Agent": self.config.user_agent,
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;"
+                    "application/atom+xml,text/xml;q=0.9,*/*;q=0.8"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            },
         )
 
     def _request_text_with_retry(
@@ -647,8 +769,9 @@ class PolicySubscriber:
                 if not is_last_attempt:
                     time.sleep(max(0.0, self.config.retry_delay_sec))
 
+        detail = f"{type(last_error).__name__}: {last_error}" if last_error else "unknown"
         raise PolicyError(
-            f"Failed to fetch policy page after {self.config.retry_count} retries: {url}"
+            f"Failed to fetch policy page after {self.config.retry_count} retries: {url} ({detail})"
         ) from last_error
 
     @staticmethod
@@ -690,12 +813,23 @@ class PolicySubscriber:
 
         return "\n".join(parts) if parts else None
 
-    @staticmethod
-    def _parse_date(value: str) -> Optional[date]:
-        value = PolicySubscriber._clean_text(value)
+    @classmethod
+    def _parse_date(cls, value: str) -> Optional[date]:
+        value = cls._clean_text(value)
 
         if not value:
             return None
+
+        # ISO8601（Atom 常见）
+        iso_candidate = value.replace("Z", "+00:00")
+        if "T" in iso_candidate:
+            try:
+                dt = datetime.fromisoformat(iso_candidate[:26])
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt.date()
+            except ValueError:
+                pass
 
         formats = [
             "%Y-%m-%d",
@@ -708,7 +842,7 @@ class PolicySubscriber:
 
         for fmt in formats:
             try:
-                return datetime.strptime(value, fmt).date()
+                return datetime.strptime(value[:10] if fmt == "%Y-%m-%d" else value, fmt).date()
             except ValueError:
                 continue
 
@@ -729,8 +863,26 @@ class PolicySubscriber:
         return value[:max_length]
 
 
+def fetch_policy_articles(
+    *,
+    countries: Optional[Iterable[str]] = None,
+    max_articles_per_country: int = 30,
+    download_date: Optional[date] = None,
+) -> PolicyFetchResult:
+    """
+    功能：拉取多国政策源并返回 PolicyFetchResult。
+    输入：countries 默认 PolicySubscriber.DEFAULT_COUNTRIES；max_articles_per_country 单国上限。
+    输出：PolicyFetchResult（articles + errors）；副作用：HTTP 请求。
+    上下游：crawler.orchestrator.async_sync_policy。
+    """
+    cfg = PolicyConfig(max_articles_per_country=max(1, max_articles_per_country))
+    sub = PolicySubscriber(cfg)
+    return sub.subscribe(countries=countries, download_date=download_date)
+
+
 def main() -> None:
     config = PolicyConfig(
+        max_articles_per_country=3,
         eu_days_back=1,
         brazil_start_days_back=5,
         brazil_end_days_back=5,
@@ -738,25 +890,20 @@ def main() -> None:
     )
 
     subscriber = PolicySubscriber(config)
-
-    page = subscriber.subscribe(
-        countries=[
-            "US",
-            "UK",
-            "EU",
-            "IN",
-            "BR",
-        ],
+    result = subscriber.subscribe(
+        countries=["US", "UK", "EU", "IN", "BR"],
         download_date=date.today(),
     )
 
-    print(f"Fetched articles: {len(page.articles)}")
-    print(f"Fetched URLs: {len(page.article_urls)}")
-    print(f"Source pages: {page.page_url}")
+    print(f"Fetched articles: {len(result.articles)}")
+    if result.errors:
+        print("Errors:")
+        for err in result.errors:
+            print(f"  - {err}")
     print("-" * 80)
 
-    for index, article in enumerate(page.articles, start=1):
-        print(f"[{index}]")
+    for index, article in enumerate(result.articles, start=1):
+        print(f"[{index}] {article.section_name}")
         print(
             json.dumps(
                 article.model_dump(),

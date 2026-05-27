@@ -102,9 +102,17 @@ def render_completed_job_body(row: Dict[str, Any], slot_key: str) -> None:
         "wechat_rss_sync": "微信 RSS",
         "xinhua_tech_sync": "新华网科技",
         "sina_tech_sync": "新浪科技",
+        "policy_sync": "政策/法规",
+        "literature_sync": "文献库",
     }
     if jt in sync_labels:
-        _render_feed_sync_success(res, sync_labels[jt])
+        if jt == "literature_sync":
+            st.success(
+                f"✅ {sync_labels[jt]}同步完成：新入库 **{res.get('saved', 0)}**，"
+                f"已有跳过 {res.get('skipped_url_dup', 0)}，失败 {res.get('failed', 0)}"
+            )
+        else:
+            _render_feed_sync_success(res, sync_labels[jt])
     elif jt == "agent_scout":
         _render_agent_scout_completed(res)
     elif jt == "deep_research":

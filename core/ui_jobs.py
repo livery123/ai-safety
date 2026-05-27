@@ -128,6 +128,10 @@ def start_job_thread(job_type: str, payload: Dict[str, Any]) -> str:
                 res = _work_xinhua_tech_sync(payload)
             elif job_type == "sina_tech_sync":
                 res = _work_sina_tech_sync(payload)
+            elif job_type == "policy_sync":
+                res = _work_policy_sync(payload)
+            elif job_type == "literature_sync":
+                res = _work_literature_sync(payload)
             elif job_type == "agent_scout":
                 res = _work_agent_scout(payload)
             elif job_type == "deep_research":
@@ -296,6 +300,73 @@ def _work_wechat_rss_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         "skipped_no_incident": r.skipped_no_incident,
         "failed": r.failed,
         "new_keywords": list(r.new_keywords[:20]),
+        "debug_log": list(r.debug_log),
+    }
+
+
+def _work_policy_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    功能：政策/法规源同步 Worker。
+    输入：payload 含 countries（列表）、max_articles_per_country、rag_enabled、dry_run。
+    输出：SyncResult 摘要 dict。
+    上下游：crawler.orchestrator.sync_policy。
+    """
+    raw_countries = payload.get("countries")
+    countries: Optional[List[str]] = None
+    if isinstance(raw_countries, list) and raw_countries:
+        countries = [str(x).strip().upper() for x in raw_countries if str(x).strip()]
+        countries = countries or None
+    max_per = int(payload.get("max_articles_per_country", 10))
+    rag_enabled = bool(payload.get("rag_enabled", False))
+    dry_run = bool(payload.get("dry_run", False))
+    skip_prefilter = bool(payload.get("skip_prefilter", False))
+    from crawler.orchestrator import sync_policy
+
+    r = sync_policy(
+        countries=countries,
+        max_articles_per_country=max_per,
+        rag_enabled=rag_enabled,
+        dry_run=dry_run,
+        skip_prefilter=skip_prefilter,
+    )
+    return {
+        "saved": r.saved,
+        "skipped_url_dup": r.skipped_url_dup,
+        "skipped_no_incident": r.skipped_no_incident,
+        "failed": r.failed,
+        "new_keywords": list(r.new_keywords[:20]),
+        "debug_log": list(r.debug_log),
+    }
+
+
+def _work_literature_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    功能：文献库同步 Worker（arXiv/Scopus/Springer → literature_items）。
+    输入：payload 含 sources 列表及各源条数上限；dry_run 不入库。
+    输出：LiteratureSyncResult 摘要 dict。
+    """
+    raw_sources = payload.get("sources")
+    sources: Optional[List[str]] = None
+    if isinstance(raw_sources, list) and raw_sources:
+        sources = [str(x).strip().lower() for x in raw_sources if str(x).strip()]
+        sources = sources or None
+    dry_run = bool(payload.get("dry_run", False))
+    from crawler.orchestrator import sync_literature
+
+    r = sync_literature(
+        sources=sources or ["arxiv"],
+        max_arxiv_per_category=int(payload.get("max_arxiv_per_category", 3)),
+        max_springer_per_domain=int(payload.get("max_springer_per_domain", 3)),
+        scopus_max_results=int(payload.get("scopus_max_results", 10)),
+        scopus_days_back=int(payload.get("scopus_days_back", 7)),
+        dry_run=dry_run,
+    )
+    return {
+        "saved": r.saved,
+        "skipped_url_dup": r.skipped_url_dup,
+        "skipped_no_incident": 0,
+        "failed": r.failed,
+        "new_keywords": [],
         "debug_log": list(r.debug_log),
     }
 

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
 from typing import Any, List, Optional, Tuple
 
 import pandas as pd
@@ -22,6 +23,22 @@ import pymysql.cursors
 
 from core.db import coerce_risk_domain
 from core.mysql_db import mysql_conn
+
+
+def _format_literature_display_time(value: Any) -> Optional[str]:
+    """文献列表「时间」列：优先展示发表日，格式化为 YYYY-MM-DD。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, date):
+        return value.isoformat()
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return text
 
 
 def _read_sql_dataframe(sql: str, params: Optional[Tuple[Any, ...]] = None) -> pd.DataFrame:
@@ -207,6 +224,45 @@ def count_policy_recent_days(days: int = 7, *, keyword: Optional[str] = None) ->
     return int(pd.to_numeric(df.iloc[0].get("n", 0), errors="coerce") or 0)
 
 
+def fetch_policy_recent_rows(
+    days: int = 7,
+    limit: int = 80,
+    *,
+    keyword: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    功能：近 N 日政策法规明细（供本周摘要与子域统计）。
+    输入：days 窗口、limit 上限、可选 keyword。
+    输出：与 fetch_policy_track_page 同结构的 DataFrame。
+    """
+    d = max(1, min(int(days), 366))
+    lim = max(5, min(int(limit), 300))
+    where_sql, binds = _policy_where_clause(keyword)
+    sql = f"""
+    SELECT
+        e.id AS id,
+        a.title_raw AS `标题`,
+        e.content_type AS `资讯类别`,
+        e.risk_domain AS `主域`,
+        e.main_topic AS main_topic,
+        e.risk_subdomains_json AS _subs,
+        e.entities_json AS _ents,
+        a.summary_raw AS `摘要`,
+        a.source AS `来源平台`,
+        a.normalized_url AS URL,
+        e.tags_raw AS _tags,
+        COALESCE(a.published_at, e.created_at) AS `时间`
+    FROM article_extractions e
+    INNER JOIN articles a ON a.id = e.article_id
+    WHERE {where_sql}
+      AND COALESCE(a.published_at, e.created_at) >= DATE_SUB(NOW(), INTERVAL %s DAY)
+    ORDER BY COALESCE(a.published_at, e.created_at) DESC
+    LIMIT %s
+    """
+    df = _read_sql_dataframe(sql, tuple(list(binds) + [d, lim]))
+    return _finalize_row_df(df)
+
+
 # ---------------------------------------------------------------------------
 # 国际会议
 # ---------------------------------------------------------------------------
@@ -321,6 +377,45 @@ def count_meeting_recent_days(days: int = 30, *, keyword: Optional[str] = None) 
     return int(pd.to_numeric(df.iloc[0].get("n", 0), errors="coerce") or 0)
 
 
+def fetch_meeting_recent_rows(
+    days: int = 7,
+    limit: int = 80,
+    *,
+    keyword: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    功能：近 N 日国际会议明细（供本周摘要与子域统计）。
+    输入：days 窗口、limit 上限、可选 keyword。
+    输出：与 fetch_meeting_track_page 同结构的 DataFrame。
+    """
+    d = max(1, min(int(days), 366))
+    lim = max(5, min(int(limit), 300))
+    where_sql, binds = _meeting_where_clause(keyword)
+    sql = f"""
+    SELECT
+        e.id AS id,
+        a.title_raw AS `标题`,
+        e.content_type AS `资讯类别`,
+        e.risk_domain AS `主域`,
+        e.main_topic AS main_topic,
+        e.risk_subdomains_json AS _subs,
+        e.entities_json AS _ents,
+        a.summary_raw AS `摘要`,
+        a.source AS `来源平台`,
+        a.normalized_url AS URL,
+        e.tags_raw AS _tags,
+        COALESCE(a.published_at, e.created_at) AS `时间`
+    FROM article_extractions e
+    INNER JOIN articles a ON a.id = e.article_id
+    WHERE {where_sql}
+      AND COALESCE(a.published_at, e.created_at) >= DATE_SUB(NOW(), INTERVAL %s DAY)
+    ORDER BY COALESCE(a.published_at, e.created_at) DESC
+    LIMIT %s
+    """
+    df = _read_sql_dataframe(sql, tuple(list(binds) + [d, lim]))
+    return _finalize_row_df(df)
+
+
 # ---------------------------------------------------------------------------
 # 文献监测 —— 预留接口（不向 MySQL 发查询）
 # ---------------------------------------------------------------------------
@@ -328,32 +423,196 @@ def count_meeting_recent_days(days: int = 30, *, keyword: Optional[str] = None) 
 
 def literature_monitor_status() -> dict:
     """返回文献模块是否已实现及说明字符串，供前端展示。"""
-    return {
-        "implemented": False,
-        "planned_tables": ["literature_records", "literature_authors"],
-        "message": (
-            "待接入论文平台（如 arXiv / OpenAlex / Semantic Scholar）与 "
-            "`literature_records` 等业务表后将在此展示作者、机构与平台聚合。"
-        ),
-    }
+    try:
+        from core.mysql_db import count_literature_items
+
+        total = count_literature_items()
+        return {
+            "implemented": True,
+            "planned_tables": ["literature_items"],
+            "total_rows": total,
+            "message": f"已接入 arXiv / Scopus / Springer → literature_items，当前 {total} 条。",
+        }
+    except Exception as e:
+        return {
+            "implemented": False,
+            "planned_tables": ["literature_items"],
+            "total_rows": 0,
+            "message": f"literature_items 表不可用: {type(e).__name__}: {e}",
+        }
 
 
-def count_literature_track_rows(**_kwargs: Any) -> int:
-    """占位：恒为 0。"""
-    return 0
+def count_literature_recent_days(
+    days: int = 7,
+    *,
+    keyword: Optional[str] = None,
+    source: Optional[str] = None,
+) -> int:
+    """文献库近 N 日新增条数。"""
+    d = max(1, min(int(days), 366))
+    try:
+        wheres = ["COALESCE(published_at, created_at) >= DATE_SUB(NOW(), INTERVAL %s DAY)"]
+        params: List[Any] = [d]
+        src = (source or "").strip()
+        if src:
+            wheres.append("source = %s")
+            params.append(src)
+        kw = (keyword or "").strip()
+        if kw:
+            wheres.append("(title LIKE %s OR abstract LIKE %s)")
+            like = f"%{kw}%"
+            params.extend([like, like])
+        sql = f"SELECT COUNT(*) AS n FROM literature_items WHERE {' AND '.join(wheres)}"
+        df = _read_sql_dataframe(sql, tuple(params))
+        if df.empty:
+            return 0
+        return int(pd.to_numeric(df.iloc[0].get("n", 0), errors="coerce") or 0)
+    except Exception:
+        return 0
 
 
-def fetch_literature_track_page(offset: int, limit: int, **_kwargs: Any) -> pd.DataFrame:
-    """占位：返回带列结构的空 DataFrame。"""
-    _ = offset, limit
-    return _finalize_row_df(pd.DataFrame())
+def count_literature_track_rows(*, keyword: Optional[str] = None, source: Optional[str] = None) -> int:
+    """文献库条目数；可选 keyword / source 过滤。"""
+    try:
+        wheres = ["1=1"]
+        params: List[Any] = []
+        src = (source or "").strip()
+        if src:
+            wheres.append("source = %s")
+            params.append(src)
+        kw = (keyword or "").strip()
+        if kw:
+            wheres.append("(title LIKE %s OR abstract LIKE %s)")
+            like = f"%{kw}%"
+            params.extend([like, like])
+        sql = f"SELECT COUNT(*) AS n FROM literature_items WHERE {' AND '.join(wheres)}"
+        df = _read_sql_dataframe(sql, tuple(params))
+        if df.empty:
+            return 0
+        return int(pd.to_numeric(df.iloc[0].get("n", 0), errors="coerce") or 0)
+    except Exception:
+        return 0
 
 
-def aggregate_literature_by_week(**_kwargs: Any) -> pd.DataFrame:
-    """占位：空周趋势表。"""
-    return pd.DataFrame(columns=["week_bucket", "sort_ts", "cnt"])
+def fetch_literature_recent_rows(
+    days: int = 7,
+    limit: int = 80,
+    *,
+    keyword: Optional[str] = None,
+    source: Optional[str] = None,
+) -> pd.DataFrame:
+    """近 N 日文献明细（供本周摘要要点）。"""
+    try:
+        from core.mysql_db import fetch_literature_page
+        import json
+
+        d = max(1, min(int(days), 366))
+        lim = max(5, min(int(limit), 300))
+        rows = fetch_literature_page(0, lim * 3, source=source, keyword=keyword)
+        if not rows:
+            return pd.DataFrame(columns=["标题", "时间"])
+        out = []
+        cutoff = datetime.now() - timedelta(days=d)
+        for r in rows:
+            ts = r.get("published_at") or r.get("created_at")
+            if ts is None:
+                continue
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00").split("+")[0])
+                except ValueError:
+                    continue
+            if hasattr(ts, "replace") and ts.tzinfo:
+                ts = ts.replace(tzinfo=None)
+            if ts < cutoff:
+                continue
+            out.append({"标题": r.get("title"), "时间": ts})
+            if len(out) >= lim:
+                break
+        return pd.DataFrame(out)
+    except Exception:
+        return pd.DataFrame(columns=["标题", "时间"])
 
 
-def aggregate_literature_by_source(**_kwargs: Any) -> pd.DataFrame:
-    """占位：空来源分布表。"""
-    return pd.DataFrame(columns=["source", "cnt"])
+def fetch_literature_track_page(
+    offset: int,
+    limit: int,
+    *,
+    keyword: Optional[str] = None,
+    source: Optional[str] = None,
+) -> pd.DataFrame:
+    """文献库分页明细（展示用）。"""
+    try:
+        from core.mysql_db import fetch_literature_page
+        import json
+
+        rows = fetch_literature_page(offset, limit, source=source, keyword=keyword)
+        if not rows:
+            return pd.DataFrame(
+                columns=["标题", "来源", "作者", "期刊/会议", "类型", "DOI", "时间", "链接"]
+            )
+        out = []
+        for r in rows:
+            authors_raw = r.get("authors_json")
+            authors: List[str] = []
+            if authors_raw:
+                try:
+                    parsed = json.loads(authors_raw) if isinstance(authors_raw, str) else authors_raw
+                    if isinstance(parsed, list):
+                        authors = [str(x) for x in parsed[:5]]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            out.append(
+                {
+                    "标题": r.get("title"),
+                    "来源": r.get("source"),
+                    "作者": "、".join(authors),
+                    "期刊/会议": r.get("publication_name"),
+                    "类型": r.get("document_type"),
+                    "DOI": r.get("doi") or r.get("external_id"),
+                    "时间": _format_literature_display_time(
+                        r.get("published_at") or r.get("created_at")
+                    ),
+                    "链接": r.get("landing_url"),
+                }
+            )
+        return pd.DataFrame(out)
+    except Exception:
+        return pd.DataFrame(
+            columns=["标题", "来源", "作者", "期刊/会议", "类型", "DOI", "时间", "链接"]
+        )
+
+
+def aggregate_literature_by_week(limit_weeks: int = 16) -> pd.DataFrame:
+    """按周聚合 literature_items。"""
+    lw = max(4, min(int(limit_weeks), 104))
+    sql = """
+    SELECT
+      DATE_FORMAT(COALESCE(published_at, created_at), '%X-W%V') AS week_bucket,
+      MIN(COALESCE(published_at, created_at)) AS sort_ts,
+      COUNT(*) AS cnt
+    FROM literature_items
+    WHERE COALESCE(published_at, created_at) IS NOT NULL
+    GROUP BY week_bucket
+    ORDER BY sort_ts DESC
+    LIMIT %s
+    """
+    try:
+        return _read_sql_dataframe(sql, (lw,))
+    except Exception:
+        return pd.DataFrame(columns=["week_bucket", "sort_ts", "cnt"])
+
+
+def aggregate_literature_by_source(limit: int = 20) -> pd.DataFrame:
+    lm = max(5, min(int(limit), 50))
+    sql = """
+    SELECT source AS source, COUNT(*) AS cnt
+    FROM literature_items
+    GROUP BY source
+    ORDER BY cnt DESC
+    LIMIT %s
+    """
+    try:
+        return _read_sql_dataframe(sql, (lm,))
+    except Exception:
+        return pd.DataFrame(columns=["source", "cnt"])

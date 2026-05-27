@@ -11,6 +11,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from datetime import timezone
 from email.utils import parsedate_to_datetime
 from typing import Iterable, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
@@ -340,7 +341,8 @@ class ArxivComputerScienceSubscriber:
                 continue
 
             try:
-                return parsedate_to_datetime(value).isoformat()
+                dt_utc = parsedate_to_datetime(value).astimezone(timezone.utc)
+                return dt_utc.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 return cls._clean_text(value)
 

@@ -553,3 +553,142 @@ def get_research_report_by_id(report_id: int) -> Optional[Dict[str, Any]]:
     out = dict(row)
     out["sources"] = srcs
     return out
+
+
+def get_literature_by_url(normalized_url: str) -> Optional[Dict[str, Any]]:
+    """按规范化 URL 查询 literature_items；无则 None。"""
+    if not normalized_url:
+        return None
+    with mysql_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, normalized_url, source, external_id, doi, title
+                FROM literature_items
+                WHERE normalized_url = %s
+                LIMIT 1
+                """,
+                (normalized_url,),
+            )
+            return cur.fetchone()
+
+
+def save_literature_item(
+    *,
+    url: str,
+    source: str,
+    title: str,
+    abstract: str = "",
+    authors: Optional[List[str]] = None,
+    doi: str = "",
+    external_id: str = "",
+    publication_name: str = "",
+    document_type: str = "",
+    subject_area: str = "",
+    published_at: Optional[datetime] = None,
+    pdf_url: str = "",
+    raw_metadata: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, bool]:
+    """
+    功能：文献资料 upsert（按 normalized_url 去重，已存在则跳过写入）。
+    输入：LiteratureItem 各字段；published_at 为 naive datetime。
+    输出：(literature_items.id, is_new)；副作用：MySQL INSERT。
+    """
+    normalized_url = normalize_url(url)
+    if not normalized_url:
+        raise ValueError("url is required")
+    landing = (url or "").strip()
+    with mysql_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM literature_items WHERE normalized_url = %s LIMIT 1",
+                (normalized_url,),
+            )
+            row = cur.fetchone()
+            if row:
+                return int(row["id"]), False
+
+            cur.execute(
+                """
+                INSERT INTO literature_items (
+                    normalized_url, source, external_id, doi, title, abstract,
+                    authors_json, publication_name, document_type, subject_area,
+                    published_at, pdf_url, landing_url, raw_metadata_json
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s,
+                    CAST(%s AS JSON), %s, %s, %s,
+                    %s, %s, %s, CAST(%s AS JSON)
+                )
+                """,
+                (
+                    normalized_url,
+                    (source or "").strip()[:64],
+                    (external_id or "").strip()[:191],
+                    (doi or "").strip()[:255],
+                    (title or "").strip()[:1024],
+                    (abstract or "").strip() or None,
+                    _ensure_json_array(authors or []),
+                    (publication_name or "").strip()[:512],
+                    (document_type or "").strip()[:128],
+                    (subject_area or "").strip()[:255],
+                    published_at,
+                    (pdf_url or "").strip()[:1024],
+                    landing[:1024],
+                    json.dumps(raw_metadata or {}, ensure_ascii=False, default=str),
+                ),
+            )
+            return int(cur.lastrowid), True
+
+
+def count_literature_items(*, source: Optional[str] = None) -> int:
+    """文献库总条数；可选按 source 过滤。"""
+    sql = "SELECT COUNT(*) AS n FROM literature_items WHERE 1=1"
+    params: List[Any] = []
+    if source and str(source).strip():
+        sql += " AND source = %s"
+        params.append(str(source).strip())
+    with mysql_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+    return int((row or {}).get("n") or 0)
+
+
+def fetch_literature_page(
+    offset: int,
+    limit: int,
+    *,
+    source: Optional[str] = None,
+    keyword: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    功能：文献库分页列表（供 Streamlit 展示）。
+    输入：offset/limit；source 过滤 arxiv/scopus/springer；keyword 匹配标题/摘要。
+    输出：行 dict 列表。
+    """
+    lim = max(1, min(int(limit), 200))
+    off = max(0, int(offset))
+    wheres = ["1=1"]
+    params: List[Any] = []
+    if source and str(source).strip():
+        wheres.append("source = %s")
+        params.append(str(source).strip())
+    kw = (keyword or "").strip()
+    if kw:
+        wheres.append("(title LIKE %s OR abstract LIKE %s)")
+        like = f"%{kw}%"
+        params.extend([like, like])
+    sql = f"""
+        SELECT id, source, title, abstract, authors_json, publication_name,
+               document_type, subject_area, doi, external_id, published_at,
+               landing_url, pdf_url, created_at
+        FROM literature_items
+        WHERE {" AND ".join(wheres)}
+        ORDER BY COALESCE(published_at, created_at) DESC
+        LIMIT %s OFFSET %s
+    """
+    params.extend([lim, off])
+    with mysql_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return list(cur.fetchall() or [])

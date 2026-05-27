@@ -21,6 +21,7 @@ from core.config import (
     MYSQL_HOST,
     MYSQL_PORT,
     NYT_API_KEY,
+    SCOPUS_API_KEY,
 )
 from core.ui_jobs import start_job_thread
 from crawler.sources import SINA_TECH_URL, XINHUA_TECH_URL
@@ -80,6 +81,10 @@ def render_system_page() -> None:
         st.caption(f"• 列表页抓取 [{SINA_TECH_URL}]({SINA_TECH_URL})，解析正文后并发 LLM 抽取入库")
         st.caption("**微信公众号 RSS（wechat2rss，已集成）**")
         st.caption("• 配置池内公众号 RSS；拉取标题与正文摘要；后台同步可走 SQLite 任务队列")
+        st.caption("**政策/法规源（policy，已集成）**")
+        st.caption("• US/UK/EU/IN/BR 多国政策 RSS/HTML → LLM 抽取 → articles（source=policy:XX）")
+        st.caption("**文献库（arxiv/scopus/springer，已集成）**")
+        st.caption("• arXiv / Scopus / Springer → literature_items 表，供专项监测展示，不跑 LLM")
         st.caption("**Crawl4AI（已集成，按 URL 侦察）**")
         st.caption("• 支持任意 URL：CSET、斯坦福 AI Index、OpenAI 博客等")
         st.caption("• 通过浏览器引擎渲染 JS 页面后提取结构化情报")
@@ -102,8 +107,8 @@ def render_system_page() -> None:
             st.caption("（未设置 DEMO_PASSWORD 环境变量，操作区默认开放）")
 
         st.caption(
-            "**卫报 / NYT / 新华网 / 新浪 / 微信 RSS / Agent 侦察**在**后台线程**执行，队列记在 SQLite "
-            "`ui_background_jobs`。点按钮提交后，在下方卡片中「刷新任务状态」跟进进度。"
+            "**卫报 / NYT / 政策 / 文献 / 新华网 / 新浪 / 微信 RSS / Agent 侦察**在**后台线程**执行，"
+            "队列记在 SQLite `ui_background_jobs`。点按钮提交后，在下方卡片中「刷新任务状态」跟进进度。"
         )
 
         op1, op2 = st.columns(2)
@@ -233,6 +238,68 @@ def render_system_page() -> None:
                 st.session_state.pop("_bg_sina_job_cleared_cache", None)
                 st.rerun()
 
+        pol_sn1, pol_sn2 = st.columns(2)
+
+        with pol_sn1:
+            st.markdown("**🏛 政策/法规同步（→ articles）**")
+            pol_countries = st.multiselect(
+                "国家/地区",
+                ["US", "UK", "EU", "IN", "BR"],
+                default=["US", "EU"],
+                key="policy_countries",
+            )
+            pol_max = st.slider("每国最多条数", 3, 30, 10, key="policy_max")
+            if st.button(
+                "🚀 后台提交政策同步",
+                type="secondary",
+                use_container_width=True,
+                key="btn_policy_sync",
+            ):
+                jid = start_job_thread(
+                    "policy_sync",
+                    {
+                        "countries": pol_countries or None,
+                        "max_articles_per_country": int(pol_max),
+                        "rag_enabled": False,
+                    },
+                )
+                st.session_state["bg_policy_job"] = jid
+                st.session_state.pop("_bg_policy_job_cleared_cache", None)
+                st.rerun()
+
+        with pol_sn2:
+            st.markdown("**📚 文献库同步（→ literature_items）**")
+            lit_sources = st.multiselect(
+                "文献源",
+                ["arxiv", "springer", "scopus"],
+                default=["arxiv"],
+                key="lit_sources",
+            )
+            lit_max = st.slider("每源/分类上限", 1, 10, 3, key="lit_max")
+            if SCOPUS_API_KEY:
+                st.caption("Scopus API Key 已配置")
+            else:
+                st.caption("⚠️ SCOPUS_API_KEY 未配置时 Scopus 同步将失败")
+            if st.button(
+                "🚀 后台提交文献同步",
+                type="secondary",
+                use_container_width=True,
+                key="btn_literature_sync",
+            ):
+                jid = start_job_thread(
+                    "literature_sync",
+                    {
+                        "sources": lit_sources or ["arxiv"],
+                        "max_arxiv_per_category": int(lit_max),
+                        "max_springer_per_domain": int(lit_max),
+                        "scopus_max_results": int(lit_max) * 5,
+                        "rag_enabled": False,
+                    },
+                )
+                st.session_state["bg_literature_job"] = jid
+                st.session_state.pop("_bg_literature_job_cleared_cache", None)
+                st.rerun()
+
         st.divider()
 
         st.markdown("**🔍 Agent URL 深度侦察**")
@@ -273,6 +340,8 @@ def render_system_page() -> None:
         render_background_job_panel("bg_wechat_job", "微信 RSS 同步")
         render_background_job_panel("bg_xinhua_job", "新华网科技同步")
         render_background_job_panel("bg_sina_job", "新浪科技同步")
+        render_background_job_panel("bg_policy_job", "政策/法规同步")
+        render_background_job_panel("bg_literature_job", "文献库同步")
         render_background_job_panel("bg_scout_job", "Agent URL 侦察")
     else:
         st.info("请输入正确的演示密码以解锁操作区。")
