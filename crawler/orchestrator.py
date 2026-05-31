@@ -127,6 +127,16 @@ def _persist_mysql_phase1(
             except (ValueError, AttributeError):
                 pass
 
+    if not (art.title or "").strip():
+        result.debug_log.append("⏭ 缺少标题，跳过入库")
+        result.failed += 1
+        return
+
+    if published_at is None:
+        result.debug_log.append(f"⏭ 缺少有效发布时间，跳过入库: {(art.title or '')[:60]}")
+        result.failed += 1
+        return
+
     try:
         article_id, is_new = save_article(
             url=art.web_url,
@@ -1376,12 +1386,19 @@ def sync_literature(
             result.failed += 1
 
     log.append(f"📚 合计 {len(all_items)} 条待处理{dry_tag}")
+    from crawler.sync_quality import literature_required_ok
+
     for i, item in enumerate(all_items, 1):
+        ok, reason = literature_required_ok(item)
         fields = _literature_field_ok(item)
         log.append(
             f"  [{i}] {item.source} | {item.title[:50]} | "
             f"url={fields['url']} meta={fields['abstract_or_meta']} date={fields['published_at']}"
         )
+        if not ok:
+            result.failed += 1
+            log.append(f"  ⏭ 缺关键字段跳过: {reason}")
+            continue
         if dry_run:
             result.saved += 1
             continue

@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Safety Portal Web (Next.js)
+After=network.target ai-safety-portal-api.service
+Wants=ai-safety-portal-api.service
+
+[Service]
+User=liwr
+WorkingDirectory=/home/liwr/ai-safety/web
+EnvironmentFile=/home/liwr/ai-safety/web/.env.local
+Environment=PATH=/home/liwr/.local/node-extract/bin:/usr/bin:/bin
+ExecStart=/home/liwr/.local/node-extract/bin/npm run start -- -p 3001 -H 127.0.0.1
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

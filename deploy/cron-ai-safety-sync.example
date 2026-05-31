@@ -1,0 +1,19 @@
+# =============================================================================
+# 三子系统定时同步（cron 示例）
+#
+# 安装：crontab -e，粘贴下方行（路径按服务器调整）
+# 日志：/tmp/ai-safety-sync.log
+# =============================================================================
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+ROOT=/home/liwr/ai-safety
+PY=/home/liwr/ai-safety/venv/bin/python
+LOG=/tmp/ai-safety-sync.log
+
+# 政策+会议 全信源新闻包（Guardian/NYT/微信/新华/新浪/政策官方源），每 6 小时
+# LLM 自动分类：多数 policy/report，少数 meeting
+0 */6 * * * cd $ROOT && $PY scripts/sync_sources.py --source news --no-rag >> $LOG 2>&1
+
+# 文献三源，每天 03:00 与 15:00（参数对齐 Streamlit 手动默认）
+0 3,15 * * * cd $ROOT && $PY scripts/sync_sources.py --source literature --literature-sources arxiv scopus springer --max-articles 3 --no-rag >> $LOG 2>&1

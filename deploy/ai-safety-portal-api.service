@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Safety Portal API (FastAPI)
+After=network.target
+
+[Service]
+User=liwr
+WorkingDirectory=/home/liwr/ai-safety
+EnvironmentFile=/home/liwr/ai-safety/.env
+ExecStart=/home/liwr/ai-safety/venv/bin/python -m uvicorn api.main:app \
+    --host 127.0.0.1 \
+    --port 8000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

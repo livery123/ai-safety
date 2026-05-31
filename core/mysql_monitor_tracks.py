@@ -16,13 +16,19 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import pymysql.cursors
 
 from core.db import coerce_risk_domain
 from core.mysql_db import mysql_conn
+from core.source_registry import (
+    build_literature_sources_filter_sql,
+    build_sources_filter_sql,
+    is_db_source_allowed,
+    scope_exclude_sql_articles,
+)
 
 
 def _format_literature_display_time(value: Any) -> Optional[str]:
@@ -107,13 +113,22 @@ def _finalize_row_df(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def _policy_where_clause(keyword: Optional[str]) -> Tuple[str, List[Any]]:
+def _policy_where_clause(
+    keyword: Optional[str],
+    sources: Optional[List[str]] = None,
+) -> Tuple[str, List[Any]]:
     """
     WHERE 片段（不含 WHERE 关键字）。
-    keyword 非空时对 title_raw / summary_raw 追加 AND (LIKE OR LIKE)。
+    keyword 非空时对 title_raw / summary_raw 追加 LIKE；sources 为多选来源 key。
     """
     base = "e.content_type IN ('policy','report')"
     binds: List[Any] = []
+    scope_sql, scope_binds = scope_exclude_sql_articles("policy")
+    base += scope_sql
+    binds.extend(scope_binds)
+    src_sql, src_binds = build_sources_filter_sql(sources)
+    base += src_sql
+    binds.extend(src_binds)
     kw = (keyword or "").strip()
     if kw:
         like = f"%{kw}%"
@@ -122,9 +137,13 @@ def _policy_where_clause(keyword: Optional[str]) -> Tuple[str, List[Any]]:
     return base, binds
 
 
-def count_policy_track_rows(*, keyword: Optional[str] = None) -> int:
+def count_policy_track_rows(
+    *,
+    keyword: Optional[str] = None,
+    sources: Optional[List[str]] = None,
+) -> int:
     """政策法规赛道符合条件的行数。"""
-    where_sql, binds = _policy_where_clause(keyword)
+    where_sql, binds = _policy_where_clause(keyword, sources)
     sql = f"""
     SELECT COUNT(*) AS n
     FROM article_extractions e
@@ -142,11 +161,12 @@ def fetch_policy_track_page(
     limit: int,
     *,
     keyword: Optional[str] = None,
+    sources: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """分页明细；limit 夹在 25～300。"""
     lim = max(25, min(int(limit), 300))
     off = max(0, int(offset))
-    where_sql, binds = _policy_where_clause(keyword)
+    where_sql, binds = _policy_where_clause(keyword, sources)
     sql = f"""
     SELECT
         e.id AS id,
@@ -210,7 +230,7 @@ def aggregate_policy_by_week(limit_weeks: int = 16) -> pd.DataFrame:
 def count_policy_recent_days(days: int = 7, *, keyword: Optional[str] = None) -> int:
     """近 N 天内新增条目数。"""
     d = max(1, min(int(days), 366))
-    where_sql, binds = _policy_where_clause(keyword)
+    where_sql, binds = _policy_where_clause(keyword, None)
     sql = f"""
     SELECT COUNT(*) AS n
     FROM article_extractions e
@@ -237,7 +257,7 @@ def fetch_policy_recent_rows(
     """
     d = max(1, min(int(days), 366))
     lim = max(5, min(int(limit), 300))
-    where_sql, binds = _policy_where_clause(keyword)
+    where_sql, binds = _policy_where_clause(keyword, None)
     sql = f"""
     SELECT
         e.id AS id,
@@ -268,9 +288,18 @@ def fetch_policy_recent_rows(
 # ---------------------------------------------------------------------------
 
 
-def _meeting_where_clause(keyword: Optional[str]) -> Tuple[str, List[Any]]:
+def _meeting_where_clause(
+    keyword: Optional[str],
+    sources: Optional[List[str]] = None,
+) -> Tuple[str, List[Any]]:
     base = "e.content_type = 'meeting'"
     binds: List[Any] = []
+    scope_sql, scope_binds = scope_exclude_sql_articles("meeting")
+    base += scope_sql
+    binds.extend(scope_binds)
+    src_sql, src_binds = build_sources_filter_sql(sources)
+    base += src_sql
+    binds.extend(src_binds)
     kw = (keyword or "").strip()
     if kw:
         like = f"%{kw}%"
@@ -279,9 +308,13 @@ def _meeting_where_clause(keyword: Optional[str]) -> Tuple[str, List[Any]]:
     return base, binds
 
 
-def count_meeting_track_rows(*, keyword: Optional[str] = None) -> int:
+def count_meeting_track_rows(
+    *,
+    keyword: Optional[str] = None,
+    sources: Optional[List[str]] = None,
+) -> int:
     """会议赛道条目数。"""
-    where_sql, binds = _meeting_where_clause(keyword)
+    where_sql, binds = _meeting_where_clause(keyword, sources)
     sql = f"""
     SELECT COUNT(*) AS n
     FROM article_extractions e
@@ -299,10 +332,11 @@ def fetch_meeting_track_page(
     limit: int,
     *,
     keyword: Optional[str] = None,
+    sources: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     lim = max(25, min(int(limit), 300))
     off = max(0, int(offset))
-    where_sql, binds = _meeting_where_clause(keyword)
+    where_sql, binds = _meeting_where_clause(keyword, sources)
     sql = f"""
     SELECT
         e.id AS id,
@@ -363,7 +397,7 @@ def aggregate_meeting_by_week(limit_weeks: int = 16) -> pd.DataFrame:
 
 def count_meeting_recent_days(days: int = 30, *, keyword: Optional[str] = None) -> int:
     d = max(1, min(int(days), 366))
-    where_sql, binds = _meeting_where_clause(keyword)
+    where_sql, binds = _meeting_where_clause(keyword, None)
     sql = f"""
     SELECT COUNT(*) AS n
     FROM article_extractions e
@@ -390,7 +424,7 @@ def fetch_meeting_recent_rows(
     """
     d = max(1, min(int(days), 366))
     lim = max(5, min(int(limit), 300))
-    where_sql, binds = _meeting_where_clause(keyword)
+    where_sql, binds = _meeting_where_clause(keyword, None)
     sql = f"""
     SELECT
         e.id AS id,
@@ -471,21 +505,41 @@ def count_literature_recent_days(
         return 0
 
 
-def count_literature_track_rows(*, keyword: Optional[str] = None, source: Optional[str] = None) -> int:
-    """文献库条目数；可选 keyword / source 过滤。"""
+def _literature_where_clause(
+    keyword: Optional[str] = None,
+    *,
+    source: Optional[str] = None,
+    sources: Optional[List[str]] = None,
+) -> Tuple[str, List[Any]]:
+    """文献库 WHERE 片段；限定 arxiv/scopus/springer。"""
+    wheres = ["source IN ('arxiv', 'scopus', 'springer')"]
+    binds: List[Any] = []
+    if sources:
+        src_sql, src_binds = build_literature_sources_filter_sql(sources)
+        if src_sql:
+            wheres.append(src_sql.lstrip(" AND "))
+            binds.extend(src_binds)
+    elif source and str(source).strip():
+        wheres.append("source = %s")
+        binds.append(str(source).strip())
+    kw = (keyword or "").strip()
+    if kw:
+        like = f"%{kw}%"
+        wheres.append("(title LIKE %s OR abstract LIKE %s)")
+        binds.extend([like, like])
+    return " AND ".join(wheres), binds
+
+
+def count_literature_track_rows(
+    *,
+    keyword: Optional[str] = None,
+    source: Optional[str] = None,
+    sources: Optional[List[str]] = None,
+) -> int:
+    """文献库条目数；可选 keyword / source / sources 过滤。"""
     try:
-        wheres = ["1=1"]
-        params: List[Any] = []
-        src = (source or "").strip()
-        if src:
-            wheres.append("source = %s")
-            params.append(src)
-        kw = (keyword or "").strip()
-        if kw:
-            wheres.append("(title LIKE %s OR abstract LIKE %s)")
-            like = f"%{kw}%"
-            params.extend([like, like])
-        sql = f"SELECT COUNT(*) AS n FROM literature_items WHERE {' AND '.join(wheres)}"
+        where_sql, params = _literature_where_clause(keyword, source=source, sources=sources)
+        sql = f"SELECT COUNT(*) AS n FROM literature_items WHERE {where_sql}"
         df = _read_sql_dataframe(sql, tuple(params))
         if df.empty:
             return 0
@@ -540,13 +594,28 @@ def fetch_literature_track_page(
     *,
     keyword: Optional[str] = None,
     source: Optional[str] = None,
+    sources: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """文献库分页明细（展示用）。"""
     try:
-        from core.mysql_db import fetch_literature_page
         import json
 
-        rows = fetch_literature_page(offset, limit, source=source, keyword=keyword)
+        lim = max(1, min(int(limit), 200))
+        off = max(0, int(offset))
+        where_sql, params = _literature_where_clause(keyword, source=source, sources=sources)
+        sql = f"""
+        SELECT id, source, title, abstract, authors_json, publication_name,
+               document_type, subject_area, doi, external_id, published_at,
+               landing_url, pdf_url, created_at
+        FROM literature_items
+        WHERE {where_sql}
+        ORDER BY COALESCE(published_at, created_at) DESC
+        LIMIT %s OFFSET %s
+        """
+        with mysql_conn() as conn:
+            cur = conn.cursor(pymysql.cursors.DictCursor)
+            cur.execute(sql, tuple(list(params) + [lim, off]))
+            rows = list(cur.fetchall() or [])
         if not rows:
             return pd.DataFrame(
                 columns=["标题", "来源", "作者", "期刊/会议", "类型", "DOI", "时间", "链接"]
@@ -616,3 +685,40 @@ def aggregate_literature_by_source(limit: int = 20) -> pd.DataFrame:
         return _read_sql_dataframe(sql, (lm,))
     except Exception:
         return pd.DataFrame(columns=["source", "cnt"])
+
+
+def list_track_source_options(track: str) -> List[Dict[str, Any]]:
+    """
+    功能：返回某 track 左栏来源筛选项（含 count）。
+    输入：policy | meeting | literature。
+    输出：SourceFilterOption 形状 dict 列表。
+    """
+    from core.source_registry import build_source_options, is_db_source_allowed
+
+    track_key = track.strip().lower()
+    if track_key in ("meetings", "meeting"):
+        track_key = "meeting"
+    elif track_key not in ("policy", "meeting", "literature"):
+        track_key = "policy"
+
+    if track_key == "literature":
+        df = aggregate_literature_by_source(limit=50)
+    elif track_key == "meeting":
+        df = aggregate_meeting_by_source(limit=50)
+    else:
+        df = aggregate_policy_by_source(limit=50)
+
+    counts: Dict[str, int] = {}
+    if not df.empty:
+        for _, row in df.iterrows():
+            src = str(row.get("source") or "").strip()
+            if not src:
+                continue
+            if track_key == "literature":
+                if src not in {"arxiv", "scopus", "springer"}:
+                    continue
+            elif not is_db_source_allowed(track_key, src):
+                continue
+            counts[src] = int(pd.to_numeric(row.get("cnt"), errors="coerce") or 0)
+
+    return build_source_options(track_key, counts)

@@ -26,7 +26,6 @@ from core.mysql_monitor_tracks import (
     count_meeting_track_rows,
     count_policy_recent_days,
     count_policy_track_rows,
-    fetch_literature_recent_rows,
     fetch_literature_track_page,
     fetch_meeting_recent_rows,
     fetch_meeting_track_page,
@@ -178,7 +177,7 @@ def build_weekly_summary_literature() -> WeeklySummary:
     week_new = count_literature_recent_days(WEEK_DAYS)
     total = count_literature_track_rows()
     src_df = aggregate_literature_by_source(5)
-    recent_df = fetch_literature_recent_rows(WEEK_DAYS, 80)
+    recent_df = fetch_literature_track_page(0, 80)
     top_src = _top_source_label(src_df)
     highlights = _format_highlights(recent_df)
     bullets = _build_bullets(
