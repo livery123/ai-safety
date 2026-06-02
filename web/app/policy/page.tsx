@@ -1,6 +1,7 @@
 import PageBanner from "@/components/PageBanner";
+import AnalysisBriefCard from "@/components/AnalysisBriefCard";
 import TrackList from "@/components/TrackList";
-import { getWeeklySummary } from "@/lib/api";
+import { getWeeklyReports, getWeeklySummary } from "@/lib/api";
 import {
   SYSTEM_COLORS,
   SYSTEM_NAMES,
@@ -10,11 +11,17 @@ import {
 
 export default async function PolicyPage() {
   let summary;
+  let brief;
   try {
-    summary = await getWeeklySummary("policy");
+    [summary, brief] = await Promise.all([
+      getWeeklySummary("policy"),
+      getWeeklyReports({ system: "policy", report_type: "brief", limit: 1 }),
+    ]);
   } catch {
     summary = undefined;
+    brief = undefined;
   }
+  const latestBrief = brief?.[0];
 
   return (
     <div className="space-y-8">
@@ -25,6 +32,7 @@ export default async function PolicyPage() {
         color={SYSTEM_COLORS.policy}
         summary={summary}
       />
+      <AnalysisBriefCard brief={latestBrief} systemKey="policy" />
       <TrackList track="policy" />
     </div>
   );

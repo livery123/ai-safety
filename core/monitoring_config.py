@@ -53,3 +53,8 @@ SUBSYSTEM_SCHEDULES: Dict[str, SubsystemSchedule] = {
 }
 
 ALL_SYSTEM_KEYS: List[str] = list(SUBSYSTEM_SCHEDULES.keys())
+
+# 监测周报 cron（周一 08:05，生成上一完整自然周报告）
+WEEKLY_REPORT_CRON = "5 8 * * 1"
+WEEKLY_REPORT_TASK_NAME = "weekly_report"
+WEEKLY_REPORT_SYSTEM_KEY = "platform"

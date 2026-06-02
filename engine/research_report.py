@@ -13,20 +13,10 @@ from typing import Any, Dict, List, Optional
 from core.config import LLM_MODEL
 from core.llm_client import OpenAICompatibleBackend
 from core.mysql_db import get_articles_brief_by_ids
+from engine.prompts import RESEARCH_REPORT_SYSTEM
 from engine.rag_ingestion.hybrid_retrieval import EvidenceHit
 
-_SYSTEM = (
-    "你是 AI 治理与安全领域的调研员。根据用户问题与给定证据片段撰写**丰满、可读**的 Markdown 调研报告（面向决策与内参阅读）。\n"
-    "硬性要求：\n"
-    "- 使用 Markdown：正文前须有一级标题；主体至少 **6～8 个二级标题（##）**，按问题自拟小标题，避免只有 2～3 节。\n"
-    "- 每个二级标题下：先 **2～4 句** 概括要点，再 **至少一段**（5～8 句）展开背景、主体、时间线、争议点或政策含义；勿仅用一句话结束该节。\n"
-    "- **引用**：重要论断须带 [来源 n]（n 与材料「来源 n」一致）；鼓励一节内综合多段材料时使用多个角标，如 [来源 2][来源 5]。\n"
-    "- **忠于证据**：不得编造材料中不存在的事实、数据或引语；材料不足处如实写「证据未涉及」。\n"
-    "- **综合节**：在主体之后增一节「## 综合与交叉观察」（或相近标题），横向对比或归纳 2～3 点，并引用至少 **3** 个不同来源编号。\n"
-    "- **局限**：另起一节「## 证据局限与未覆盖」，说明检索片段的片面性、语料缺口或矛盾处。\n"
-    "- **参考文献**：最后一节「## 参考文献」，逐条列出本次使用过的 [来源 n] + 标题（可附 URL），与正文引用对应。\n"
-    "- 全文建议 **不少于 2000 汉字**（若证据极短则尽量写满分析，并诚实说明篇幅受限原因）。\n"
-)
+_SYSTEM = RESEARCH_REPORT_SYSTEM
 
 
 def _pack_evidence(question: str, hits: List[EvidenceHit], briefs: Dict[int, Dict[str, Any]]) -> str:

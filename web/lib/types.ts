@@ -127,3 +127,23 @@ export interface SourceFilterResponse {
   options: SourceFilterOption[];
   total_count?: number;
 }
+
+export interface WeeklyReportItem {
+  id: number;
+  system_key: string;
+  report_type: string;
+  week_start: string;
+  week_end: string;
+  title: string;
+  excerpt: string;
+  article_count: number;
+  task_id?: number | null;
+  trigger_source: string;
+  created_at: string;
+}
+
+export interface WeeklyReportDetail extends WeeklyReportItem {
+  report_markdown: string;
+  model_name: string;
+  source_article_ids: number[];
+}

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core.config import API_KEY, BASE_URL
 from core.llm_client import OpenAICompatibleBackend
+from engine.prompts import EXTRACTION_SYSTEM, EXTRACTION_USER_TAIL, RISK_DOMAIN_LLM_GUIDANCE
 
 _ALLOWED_CONTENT_TYPES = frozenset(
     {"news", "meeting", "report", "policy", "opinion", "literature", "other"}
@@ -29,59 +30,9 @@ _CONTENT_TYPE_ALIASES = {
 # ---------------------------------------------------------------------------
 # 提示词：与 agentic_crawl 对齐，统一更新入口。
 # ---------------------------------------------------------------------------
-# 与 models.schema.RISK_DOMAIN_CHOICES 三条字符串完全一致；供 extraction 与 agentic_crawl 共用。
-RISK_DOMAIN_LLM_GUIDANCE = (
-    "risk_domain（意图与来源三元模型）：须从下列三项中**原样**选一整行字符串（含英文与中文括号）：\n"
-    "  - Malicious Use (恶意滥用)：人类恶意利用 AI，或对 AI 系统发起主动攻击（越狱、投毒、深度伪造诈骗、自动化网络攻击等）。\n"
-    "  - Accidental Failure (意外失效)：无恶意攻击者，因系统缺陷、幻觉或复杂环境下的失效（严重幻觉、自动驾驶误判、域外泛化失败等）。\n"
-    "  - Systemic & Ethical Risk (系统性与伦理风险)：系统按预期运行，但对社会或个人权益产生负面影响（算法偏见、隐私、版权、信息茧房、就业冲击等）。\n"
-)
-
-_SYSTEM_PROMPT = (
-    "你是一个 AI 治理与安全领域的专家分析师。"
-    "对**整篇文章**只输出**一个** JSON 对象，描述「这篇材料在 AI 治理视角下是什么」，"
-    "不要拆成多条 incident，不要输出 incidents 数组。"
-)
-
-_RELEVANCE_FILTER = (
-    "【相关性判断标准——必须严格执行】\n"
-    "★ 必须是以下核心议题之一，才能标记 is_relevant=true：\n"
-    "  1. AI 安全法规/政策/标准：政府/国际组织发布或讨论的 AI 监管规则、立法、国家标准、行政令\n"
-    "  2. AI 安全风险事件：AI 系统造成的具体伤害、事故、滥用事件、安全漏洞（有真实危害的，非技术参数）\n"
-    "  3. AI 伦理与治理争议：算法歧视诉讼/裁决、AI 隐私侵权案、深度伪造诈骗案、AI 生成内容版权纠纷\n"
-    "  4. AI 治理机制与框架：监管机构设立、AI 安全峰会、国际协议、AI 评估/审计框架\n"
-    "  5. AI 安全研究：对齐、可解释性、红队测试、AI 安全评估等学术或政策研究报告\n\n"
-    "★ 以下内容一律标记 is_relevant=false，不得以「涉及AI技术」为由强行相关：\n"
-    "  - AI/科技产品发布（新手机、新汽车、新芯片、新大模型版本的功能参数介绍）\n"
-    "  - 自动驾驶新车发布或车型测评（即使包含具身智能、VLA模型、激光雷达等词汇）\n"
-    "  - AI 公司财报、股价、融资、IPO、并购（除非同时涉及具体安全监管处罚）\n"
-    "  - 纯技术原理/性能测评（算力对比、模型评分榜单、硬件参数）\n"
-    "  - 传统互联网平台监管（社交媒体青少年保护、版权诉讼等，除非明确点名 AI 算法是核心议题）\n"
-    "  - 与 AI 无关的科技新闻（火箭、芯片供应链、消费电子、游戏等）\n"
-    "  - 企业 AI 战略/布局介绍（我们将加大 AI 投入、AI赋能XX产业等泛泛表述）\n\n"
-)
-
-_USER_INSTRUCTION = (
-    _RELEVANCE_FILTER
-    + "【相关时】输出一个 JSON 对象，字段如下（与库表 article_extractions 一一对应，外加流程字段）：\n"
-    "- is_relevant: true（流程用，不入 extraction 行）\n"
-    "- content_type: 必选其一 literature | meeting | report | policy | opinion | news（非以上则用 other）\n"
-    "- main_topic: 一句话概括，≤512 字；新闻写报道核心，会议写主题/讨论焦点；"
-    "法案/标准/常设会议/政策进程等线索也写进 main_topic（不要单独键）\n"
-    "- " + RISK_DOMAIN_LLM_GUIDANCE
-    + "- risk_subdomains: 字符串数组，治理或风险议题短标签（落库 JSON 数组）\n"
-    "- entities: 字符串数组，主要机构/公司/政府/人物（落库 JSON 数组）\n"
-    "- summary_structured: 一句话摘要，≤512 字\n"
-    "- tags: 字符串数组，3–8 个检索关键词（落库 JSON 数组）\n"
-    "- relevance_reason: 可选，简短说明为何相关（仅调试，不入 extraction 表）\n\n"
-    "【新闻】侧重：讲什么、主体、治理/风险议题、tags。\n"
-    "【会议】会议级一条：会议名/主办方/时间地点（若有）/讨论主题/主体/与 AI 治理或安全的关系；勿拆每位发言人。\n"
-    "【文献】学术论文、期刊/预印本条目：用 literature（report 侧重政策白皮书/综述报告；arxiv/学位论文等均归 literature）。\n\n"
-    "【不相关时】**仅**输出两键，不要填其它字段：\n"
-    '{ "is_relevant": false, "reject_reason": "no_ai_governance_content" }\n'
-    "（reject_reason 可用简短英文代码或短语。）\n\n"
-    "不要捏造事实；不要 {\"incidents\":[...]}；不要输出 event_hint 等已废弃字段。"
-)
+# 与 models.schema.RISK_DOMAIN_CHOICES 一致；定义见 engine.prompts（供 agentic_crawl 等 re-export）。
+_SYSTEM_PROMPT = EXTRACTION_SYSTEM
+_USER_INSTRUCTION = EXTRACTION_USER_TAIL
 
 _BODY_TRUNCATE_CHARS = 8000
 

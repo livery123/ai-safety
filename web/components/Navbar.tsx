@@ -9,6 +9,7 @@ const links = [
   { href: "/policy", label: "政策监管" },
   { href: "/meetings", label: "国际会议" },
   { href: "/literature", label: "文献情报" },
+  { href: "/reports/weekly", label: "监测周报" },
   { href: "/about", label: "关于" },
 ];
 

@@ -13,6 +13,8 @@ import type {
   StatsResponse,
   SystemInfo,
   WeeklySummary,
+  WeeklyReportItem,
+  WeeklyReportDetail,
 } from "./types";
 
 const API_BASE =
@@ -47,6 +49,23 @@ export function getMonitoringOverview(): Promise<MonitoringOverview> {
 
 export function getWeeklySummary(system: string): Promise<WeeklySummary> {
   return fetchJson(`/api/systems/${system}/weekly`);
+}
+
+export function getWeeklyReports(params: {
+  system?: string;
+  report_type?: string;
+  limit?: number;
+}): Promise<WeeklyReportItem[]> {
+  const q = new URLSearchParams();
+  if (params.system) q.set("system", params.system);
+  if (params.report_type) q.set("report_type", params.report_type);
+  if (params.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return fetchJson(`/api/analysis/reports/weekly${qs ? `?${qs}` : ""}`);
+}
+
+export function getWeeklyReportDetail(id: number): Promise<WeeklyReportDetail> {
+  return fetchJson(`/api/analysis/reports/weekly/${id}`);
 }
 
 export function getLatestIncidents(limit = 12): Promise<IncidentItem[]> {

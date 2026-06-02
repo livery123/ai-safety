@@ -15,6 +15,7 @@ from typing import Any, List, Optional
 
 import httpx
 
+from core.config import AIHUBMIX_APP_CODE as _DEFAULT_APP_CODE
 from core.config import API_KEY as _DEFAULT_KEY
 from core.config import BASE_URL as _DEFAULT_BASE
 from core.config import EMBEDDING_MODEL as _DEFAULT_EMBED_MODEL
@@ -35,6 +36,7 @@ class OpenAICompatibleBackend:
         base_url: Optional[str] = None,
         default_chat_model: Optional[str] = None,
         default_embedding_model: Optional[str] = None,
+        app_code: Optional[str] = None,
     ) -> None:
         """
         功能：绑定一次调用所需的鉴权与端点。
@@ -45,12 +47,16 @@ class OpenAICompatibleBackend:
         self._base_url = (base_url if base_url is not None else _DEFAULT_BASE).rstrip("/")
         self._default_chat_model = default_chat_model or _DEFAULT_CHAT_MODEL
         self._default_embedding_model = default_embedding_model or _DEFAULT_EMBED_MODEL
+        self._app_code = (app_code if app_code is not None else _DEFAULT_APP_CODE) or ""
 
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
+        if self._app_code:
+            headers["APP-Code"] = self._app_code
+        return headers
 
     def embed_texts(
         self,

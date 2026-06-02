@@ -22,6 +22,8 @@ LLM_MODEL: str = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-72B-Instruct")
 
 # --- 嵌入（可与 Chat 同 base_url / 同 key；模型名独立配置）---
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+# AIHubMix 等网关可选附加头（见 https://docs.aihubmix.com ）
+AIHUBMIX_APP_CODE: str = (os.getenv("AIHUBMIX_APP_CODE", "") or "").strip()
 
 # --- 持久化 ---
 DB_PATH: str = os.getenv("DB_PATH", "ai_governance.db")

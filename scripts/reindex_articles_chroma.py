@@ -5,6 +5,7 @@
 需配置 .env 中 MYSQL_*、嵌入 API；已装 chromadb。
 
   python scripts/reindex_articles_chroma.py --limit 50
+  python scripts/reindex_articles_chroma.py --all
   python scripts/reindex_articles_chroma.py --article-id 42
 """
 
@@ -21,10 +22,9 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from core.config import LLM_MODEL  # noqa: E402
+from core.config import API_KEY, BASE_URL, EMBEDDING_MODEL  # noqa: E402
 from core.mysql_db import mysql_conn  # noqa: E402
 from core.llm_client import OpenAICompatibleBackend  # noqa: E402
-from core.config import API_KEY, BASE_URL  # noqa: E402
 from engine.article_index.indexer import index_article  # noqa: E402
 
 
@@ -98,7 +98,7 @@ def reindex_one(
         published_at=pub_str,
         url=str(row.get("normalized_url") or ""),
         backend=be,
-        embedding_model=(LLM_MODEL or "").strip(),
+        embedding_model=(EMBEDDING_MODEL or "").strip(),
         extraction_ctx=ctx,
     )
 
@@ -107,6 +107,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=100, help="Max articles when scanning")
     parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--all", action="store_true", help="Reindex every article in MySQL")
     parser.add_argument("--article-id", type=int, default=0, help="Reindex a single id")
     args = parser.parse_args()
 
@@ -117,12 +118,16 @@ def main() -> None:
 
     with mysql_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id FROM articles ORDER BY id LIMIT %s OFFSET %s",
-                (max(1, args.limit), max(0, args.offset)),
-            )
+            if args.all:
+                cur.execute("SELECT id FROM articles ORDER BY id")
+            else:
+                cur.execute(
+                    "SELECT id FROM articles ORDER BY id LIMIT %s OFFSET %s",
+                    (max(1, args.limit), max(0, args.offset)),
+                )
             ids = [int(r["id"]) for r in (cur.fetchall() or [])]
 
+    print(f"embedding_model={EMBEDDING_MODEL!r} articles={len(ids)}")
     be = OpenAICompatibleBackend(api_key=API_KEY, base_url=BASE_URL)
     ok = 0
     for aid in ids:

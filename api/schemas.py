@@ -163,3 +163,50 @@ class MonitoringOverviewResponse(BaseModel):
     platform: PlatformStatus
     subsystems: List[SubsystemStatus]
     timeline: List[TimelineItem]
+
+
+class WeeklyReportItem(BaseModel):
+    """监测周报/简报列表项（不含全文）。"""
+
+    id: int
+    system_key: str
+    report_type: str = "weekly"
+    week_start: str
+    week_end: str
+    title: str = ""
+    excerpt: str = ""
+    article_count: int = 0
+    task_id: Optional[int] = None
+    trigger_source: str = "cron"
+    created_at: str = ""
+
+
+class WeeklyReportDetail(BaseModel):
+    """监测报告详情（含 Markdown 全文）。"""
+
+    id: int
+    system_key: str
+    report_type: str = "weekly"
+    week_start: str
+    week_end: str
+    title: str = ""
+    report_markdown: str = ""
+    article_count: int = 0
+    model_name: str = ""
+    task_id: Optional[int] = None
+    trigger_source: str = "cron"
+    created_at: str = ""
+    source_article_ids: List[int] = Field(default_factory=list)
+
+
+class ReportContinuityResponse(BaseModel):
+    """周报连续性验收响应。"""
+
+    system_key: str
+    report_type: str
+    expected_weeks: int
+    present_weeks: int
+    missing: List[str] = Field(default_factory=list)
+    last_report_id: Optional[int] = None
+    last_week_start: Optional[str] = None
+    last_generated_at: Optional[str] = None

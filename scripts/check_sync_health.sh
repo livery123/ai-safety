@@ -86,6 +86,27 @@ else
   echo "[WARN] FastAPI 未启动 (127.0.0.1:8000)"
 fi
 
+# 6. 监测周报
+echo ""
+WLOG="/var/log/ai-safety-weekly.log"
+if [[ -f "$WLOG" ]]; then
+  echo "[OK] 周报日志: $WLOG ($(wc -l < "$WLOG") 行)"
+  tail -3 "$WLOG" 2>/dev/null || true
+else
+  echo "[WARN] 周报日志不存在: $WLOG"
+fi
+if [[ -x "$PY" ]]; then
+  (cd "$ROOT" && "$PY" - <<'PY') || echo "[WARN] 无法检查 monitoring_weekly_reports"
+from core.mysql_weekly_reports import list_weekly_reports, check_report_continuity
+rows = list_weekly_reports(system_key="policy", report_type="weekly", limit=3)
+print(f"[INFO] policy 周报最近 {len(rows)} 条")
+for r in rows:
+    print(f"  id={r.get('id')} week={r.get('week_start')} articles={r.get('article_count')}")
+c = check_report_continuity(system_key="policy", weeks=4)
+print(f"[INFO] 连续性(4周): present={c.get('present_weeks')}/{c.get('expected_weeks')} missing={c.get('missing')}")
+PY
+fi
+
 echo ""
 if [[ "$CRON_OK" -eq 0 ]]; then
   exit 1
