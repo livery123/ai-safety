@@ -5,7 +5,8 @@ Smoke test: write one synthetic article + one article_extractions row via core.m
 Usage (from repo root, venv optional):
   python scripts/mysql_smoke_write.py
 
-Requires .env with MYSQL_* and tables from scripts/init_mysql.sql.
+Requires .env with MYSQL_* and tables from scripts/init_mysql.sql:
+  mysql -u USER -p < scripts/init_mysql.sql
 """
 
 from __future__ import annotations

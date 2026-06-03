@@ -1,0 +1,105 @@
+{
+  "reference_url": "http://106.12.173.118:8082/static/conference.html",
+  "series": [
+    {
+      "catalog_key": "ai_for_good",
+      "series_name": "AI for Good Global Summit (ITU)",
+      "category": "AI for Good Global Summit",
+      "is_major": true,
+      "sort_order": 10,
+      "aliases": ["AI for Good", "AI for Good Global Summit", "ITU AI for Good", "AI向善全球峰会"],
+      "topics": ["AI助力可持续发展", "全球AI公益应用"],
+      "official_urls": ["https://aiforgood.itu.int/"],
+      "events": [
+        {"edition_label": "AI for Good Global Summit 2026", "edition_year": 2026, "start_date": "2026-07-07", "end_date": "2026-07-10", "location": "瑞士日内瓦", "host": "国际电信联盟 (ITU)", "official_url": "https://aiforgood.itu.int/summit26/", "status": "scheduled"},
+        {"edition_label": "AI for Good Global Summit 2025", "edition_year": 2025, "start_date": "2025-07-08", "end_date": "2025-07-11", "location": "瑞士日内瓦", "host": "国际电信联盟 (ITU)", "status": "completed"},
+        {"edition_label": "AI for Good Global Summit 2024", "edition_year": 2024, "start_date": "2024-05-30", "end_date": "2024-05-31", "location": "瑞士日内瓦", "host": "国际电信联盟 (ITU)", "status": "completed"}
+      ]
+    },
+    {
+      "catalog_key": "un_ai_governance_dialogue",
+      "series_name": "全球人工智能治理对话 (UN)",
+      "category": "联合国 AI 治理对话",
+      "is_major": true,
+      "sort_order": 20,
+      "aliases": ["全球人工智能治理对话", "UN AI governance dialogue", "Global Dialogue on AI Governance", "联合国人工智能治理"],
+      "topics": ["多边AI治理", "联合国框架"],
+      "official_urls": ["https://www.un.org/global-dialogue-ai-governance/"],
+      "events": [
+        {"edition_label": "启动全球人工智能治理对话高级别会议", "edition_year": 2025, "start_date": "2025-09-25", "end_date": "2025-09-25", "location": "美国纽约 (联合国总部)", "host": "联合国", "status": "completed"},
+        {"edition_label": "全球人工智能治理对话 (预期 2026)", "edition_year": 2026, "start_date": "2026-07-01", "end_date": "2026-07-31", "location": "日内瓦", "host": "联合国", "status": "scheduled"},
+        {"edition_label": "全球人工智能治理对话 (预期 2027)", "edition_year": 2027, "start_date": "2027-05-01", "end_date": "2027-05-31", "location": "纽约", "host": "联合国", "status": "scheduled"}
+      ]
+    },
+    {
+      "catalog_key": "waic",
+      "series_name": "世界人工智能大会 (WAIC)",
+      "category": "世界人工智能大会",
+      "is_major": true,
+      "sort_order": 30,
+      "aliases": ["WAIC", "世界人工智能大会", "World Artificial Intelligence Conference", "上海世界人工智能大会"],
+      "topics": ["产业AI", "治理与开放合作"],
+      "official_urls": ["https://www.worldaic.com.cn/"],
+      "events": [
+        {"edition_label": "世界人工智能大会 2025", "edition_year": 2025, "start_date": "2025-07-26", "end_date": "2025-07-28", "location": "中国上海", "host": "上海市人民政府等", "official_url": "https://www.worldaic.com.cn/", "status": "completed"},
+        {"edition_label": "世界人工智能大会 2024", "edition_year": 2024, "start_date": "2024-07-04", "end_date": "2024-07-07", "location": "中国上海", "host": "上海市人民政府等", "status": "completed"}
+      ]
+    },
+    {
+      "catalog_key": "ai_safety_summit",
+      "series_name": "AI Safety Summit 系列",
+      "category": "AI Safety Summit 系列",
+      "is_major": true,
+      "sort_order": 40,
+      "aliases": ["AI Safety Summit", "人工智能安全峰会", "Bletchley Park", "布莱奇利园", "AI Seoul Summit", "首尔人工智能峰会", "AI Action Summit", "人工智能行动峰会", "Paris AI Summit"],
+      "topics": ["前沿模型安全", "国际协调", "首尔宣言"],
+      "official_urls": [],
+      "events": [
+        {"edition_label": "AI Action Summit (人工智能行动峰会) 2025", "edition_year": 2025, "start_date": "2025-02-10", "end_date": "2025-02-11", "location": "法国巴黎", "host": "法国政府", "status": "completed"},
+        {"edition_label": "AI Seoul Summit (首尔人工智能峰会) 2024", "edition_year": 2024, "start_date": "2024-05-21", "end_date": "2024-05-22", "location": "韩国首尔", "host": "韩国政府", "status": "completed", "notes": "签署《首尔宣言》"},
+        {"edition_label": "AI Safety Summit 2023", "edition_year": 2023, "start_date": "2023-11-01", "end_date": "2023-11-02", "location": "英国布莱奇利园", "host": "英国政府", "status": "completed", "notes": "全球首届 AI 安全峰会"}
+      ]
+    },
+    {
+      "catalog_key": "reaim",
+      "series_name": "军事领域负责任人工智能峰会 (REAIM)",
+      "category": "REAIM",
+      "is_major": true,
+      "sort_order": 50,
+      "aliases": ["REAIM", "Responsible AI in the Military Domain", "军事领域负责任人工智能", "军事 AI 治理峰会"],
+      "topics": ["军事领域AI治理", "负责任军事AI"],
+      "official_urls": ["https://www.reaimsummit.com/"],
+      "events": [
+        {"edition_label": "REAIM Summit 2024", "edition_year": 2024, "start_date": "2024-09-09", "end_date": "2024-09-10", "location": "韩国首尔", "host": "荷兰/韩国等", "status": "completed"},
+        {"edition_label": "REAIM Summit 2023", "edition_year": 2023, "start_date": "2023-02-15", "end_date": "2023-02-16", "location": "荷兰海牙", "host": "荷兰政府", "status": "completed"}
+      ]
+    },
+    {
+      "catalog_key": "global_ai_standards",
+      "series_name": "国际人工智能标准峰会",
+      "category": "国际人工智能标准峰会",
+      "is_major": true,
+      "sort_order": 60,
+      "aliases": ["Global AI Standards Summit", "International AI Standards Summit", "全球AI标准峰会", "WSC AI Standards"],
+      "topics": ["AI标准互认", "ISO IEC ITU"],
+      "official_urls": [],
+      "events": [
+        {"edition_label": "Global AI Standards Summit 2025", "edition_year": 2025, "start_date": "2025-12-02", "end_date": "2025-12-03", "location": "韩国首尔", "host": "WSC (ISO, IEC, ITU)", "status": "scheduled"},
+        {"edition_label": "International AI Standards Summit 2024", "edition_year": 2024, "start_date": "2024-10-14", "end_date": "2024-10-18", "location": "印度新德里", "host": "印度政府 / WSC", "status": "completed"}
+      ]
+    },
+    {
+      "catalog_key": "india_ai_safety",
+      "series_name": "印度 AI 安全峰会",
+      "category": "印度 AI 安全峰会",
+      "is_major": true,
+      "sort_order": 70,
+      "aliases": ["India AI Safety Summit", "印度 AI 安全峰会", "印度人工智能安全峰会", "India AI Safety", "新德里 AI 安全"],
+      "topics": ["AI安全治理", "南半球多边协调"],
+      "official_urls": [],
+      "events": [
+        {"edition_label": "India AI Safety Summit (监测占位)", "edition_year": null, "start_date": null, "end_date": null, "location": "印度", "host": "印度政府 (待核实)", "status": "unknown", "notes": "待回溯爬取补全日期与届次"}
+      ]
+    }
+  ]
+}

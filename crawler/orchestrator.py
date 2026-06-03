@@ -12,6 +12,7 @@
   各信源共用去重、并发 LLM 抽取、RAG 精炼、MySQL/Chroma 写入逻辑；
   _persist_mysql_phase1 接受 source 参数，正确标注数据来源。
   所有 async_sync_* 均支持 dry_run=True，可完整走抽取流程但跳过 MySQL/Chroma 写入，用于测试。
+  LLM/预筛未命中写入 unmatched_articles（dry_run 时不写）。
 输入：各 sync_* 函数的 query/max_pages 等参数；api_key/base_url 可覆盖 .env；rag_enabled 控制 RAG。
 输出：SyncResult（MySQL 入库篇数、跳过数、debug 日志）；副作用：HTTP 拉取 + 并发 LLM + MySQL/Chroma。
 上下游：app.py、scripts/sync_sources；下游 core.mysql_db。
@@ -23,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.config import API_KEY, BASE_URL, LLM_MODEL
@@ -53,7 +54,7 @@ from crawler.sources.sina_tech import (
     search_sina_tech_articles_multipage,
 )
 from crawler.sources.wechat2rss import fetch_wechat_pool
-from crawler.sources.policy import fetch_policy_articles
+from crawler.sources.policy import fetch_policy_articles, build_backfill_policy_config, PolicyConfig
 from crawler.sources.literature import (
     LiteratureItem,
     fetch_arxiv_literature,
@@ -94,37 +95,7 @@ def _persist_mysql_phase1(
     summary = art.trail_text or (art.body_text or "")[:512]
     content = art.body_text or art.trail_text or ""
 
-    # 解析发布时间：兼容多种来源格式，统一存为 naive datetime（不含时区）写入 MySQL。
-    # - Guardian/NYT ISO 8601（含 T 分隔，可能带 Z 或 +HH:MM 时区）
-    # - 新华网/新浪科技 _extract_date 返回的 "YYYY-MM-DD HH:MM:SS" 或 "YYYY-MM-DD HH:MM"
-    # - 新浪 meta article:published_time 带时区 ISO（如 "2026-05-15T09:07:47+08:00"）
-    published_at: Optional[datetime] = None
-    if art.web_publication_date:
-        raw_date = art.web_publication_date.strip()
-        # 先尝试不含时区的格式（截取前 19 位统一处理）
-        for fmt in (
-            "%Y-%m-%dT%H:%M:%S",   # ISO 无时区 / Guardian Z 结尾截取前19
-            "%Y-%m-%d %H:%M:%S",   # 新华/新浪空格格式含秒
-            "%Y-%m-%d %H:%M",      # 新华/新浪空格格式不含秒
-            "%Y-%m-%d",            # 政策源等仅日期
-        ):
-            try:
-                slice_len = 19 if "H" in fmt else 10
-                dt = datetime.strptime(raw_date[:slice_len], fmt)
-                published_at = dt
-                break
-            except ValueError:
-                continue
-        # 若以上均失败，再尝试带时区的 ISO 8601（新浪 meta 返回 +08:00 格式）
-        if published_at is None:
-            try:
-                from datetime import timezone
-                # Python 3.7+ fromisoformat 支持 +HH:MM（但不支持 Z）
-                normalized = raw_date.replace("Z", "+00:00")
-                dt_aware = datetime.fromisoformat(normalized)
-                published_at = dt_aware.replace(tzinfo=None)
-            except (ValueError, AttributeError):
-                pass
+    published_at = _parse_raw_article_published_at(art)
 
     if not (art.title or "").strip():
         result.debug_log.append("⏭ 缺少标题，跳过入库")
@@ -224,6 +195,141 @@ def _url_already_in_mysql(web_url: str) -> bool:
         return False
 
 
+def _parse_raw_article_published_at(art: RawArticle) -> Optional[datetime]:
+    """
+    功能：解析 RawArticle.web_publication_date 为 naive datetime（与 save_article 一致）。
+    输入：RawArticle；无法解析时返回 None。
+    输出：datetime | None。
+    """
+    if not art.web_publication_date:
+        return None
+    raw_date = art.web_publication_date.strip()
+    published_at: Optional[datetime] = None
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+    ):
+        try:
+            slice_len = 19 if "H" in fmt else 10
+            published_at = datetime.strptime(raw_date[:slice_len], fmt)
+            break
+        except ValueError:
+            continue
+    if published_at is None:
+        try:
+            from datetime import timezone
+
+            normalized = raw_date.replace("Z", "+00:00")
+            dt_aware = datetime.fromisoformat(normalized)
+            published_at = dt_aware.replace(tzinfo=None)
+        except (ValueError, AttributeError):
+            pass
+    return published_at
+
+
+def _persist_unmatched(
+    art: RawArticle,
+    *,
+    source: str,
+    reject_stage: str,
+    reject_reason: str,
+    result: SyncResult,
+) -> None:
+    """
+    功能：将未命中条目写入 unmatched_articles（best-effort，失败只记日志）。
+    输入：RawArticle、信源标签、reject_stage/reject_reason。
+    输出：无；副作用：MySQL unmatched_articles upsert。
+    """
+    if not (art.web_url or "").strip():
+        return
+    try:
+        from core.mysql_db import build_unmatched_content_preview, save_unmatched_article
+    except Exception as e:
+        result.debug_log.append(f"⚠️ unmatched 审计未启用: {type(e).__name__}: {e}")
+        return
+
+    summary = art.trail_text or ""
+    content = art.body_text or ""
+    preview = build_unmatched_content_preview(summary, content)
+    try:
+        save_unmatched_article(
+            url=art.web_url,
+            source=source,
+            title=art.title or "",
+            summary=summary,
+            content_preview=preview,
+            published_at=_parse_raw_article_published_at(art),
+            section_name=str(art.section_name or ""),
+            reject_stage=reject_stage,
+            reject_reason=reject_reason,
+        )
+    except Exception as e:
+        result.debug_log.append(f"⚠️ unmatched 写入失败: {type(e).__name__}: {e}")
+
+
+def _handle_llm_reject(
+    art: RawArticle,
+    article_dict: Optional[Dict[str, Any]],
+    *,
+    source: str,
+    dry_run: bool,
+    result: SyncResult,
+) -> None:
+    """
+    功能：LLM 阶段未命中（is_relevant=false 或解析失败）— 计数、dry_run 日志、写 unmatched。
+    输入：抽取结果 article_dict；dry_run 时不写库。
+    """
+    result.skipped_no_incident += 1
+    if dry_run:
+        if article_dict:
+            result.debug_log.append(
+                f"  ⛔ 无关: {art.title[:50]} | reason={article_dict.get('reject_reason', '')}"
+            )
+        elif art.title:
+            result.debug_log.append(
+                f"  ⛔ LLM 未产出: {art.title[:50]} | reason=llm_parse_failed"
+            )
+        return
+    reason = (
+        str(article_dict.get("reject_reason") or "no_ai_governance_content")[:255]
+        if article_dict
+        else "llm_parse_failed"
+    )
+    _persist_unmatched(
+        art,
+        source=source,
+        reject_stage="llm",
+        reject_reason=reason,
+        result=result,
+    )
+
+
+def _handle_prefilter_reject(
+    art: RawArticle,
+    *,
+    source: str,
+    dry_run: bool,
+    result: SyncResult,
+    log: List[str],
+) -> None:
+    """
+    功能：政策源关键词预筛未过（未调 LLM）— 计数、日志、写 unmatched（reject_stage=fetch）。
+    """
+    result.skipped_no_incident += 1
+    log.append(f"⏭ 预筛无关: {art.title[:55]}")
+    if dry_run:
+        return
+    _persist_unmatched(
+        art,
+        source=source,
+        reject_stage="fetch",
+        reject_reason="prefilter_keyword",
+        result=result,
+    )
+
+
 def _build_llm_backend(api_key: Optional[str], base_url: Optional[str]) -> OpenAICompatibleBackend:
     k = (api_key or "").strip() or API_KEY
     b = (base_url or "").strip() or BASE_URL
@@ -311,7 +417,7 @@ async def async_sync_guardian(
         log.extend(ext_log)
 
         if not article_dict or not article_dict.get("is_relevant"):
-            result.skipped_no_incident += 1
+            _handle_llm_reject(art, article_dict, source="guardian", dry_run=False, result=result)
             continue
 
         incident_like = article_dict_to_incident_like(article_dict)
@@ -468,7 +574,7 @@ async def async_sync_nyt(
         log.extend(ext_log)
 
         if not article_dict or not article_dict.get("is_relevant"):
-            result.skipped_no_incident += 1
+            _handle_llm_reject(art, article_dict, source="nyt", dry_run=False, result=result)
             continue
 
         incident_like = article_dict_to_incident_like(article_dict)
@@ -617,11 +723,7 @@ async def async_sync_xinhua_tech(
         log.extend(ext_log)
 
         if not article_dict or not article_dict.get("is_relevant"):
-            result.skipped_no_incident += 1
-            if dry_run and article_dict:
-                log.append(
-                    f"  ⛔ 无关: {art.title[:50]} | reason={article_dict.get('reject_reason','')}"
-                )
+            _handle_llm_reject(art, article_dict, source="xinhua_tech", dry_run=dry_run, result=result)
             continue
 
         if dry_run:
@@ -783,11 +885,7 @@ async def async_sync_sina_tech(
         log.extend(ext_log)
 
         if not article_dict or not article_dict.get("is_relevant"):
-            result.skipped_no_incident += 1
-            if dry_run and article_dict:
-                log.append(
-                    f"  ⛔ 无关: {art.title[:50]} | reason={article_dict.get('reject_reason','')}"
-                )
+            _handle_llm_reject(art, article_dict, source="sina_tech", dry_run=dry_run, result=result)
             continue
 
         if dry_run:
@@ -949,12 +1047,11 @@ async def async_sync_wechat_rss(
     for art, article_dict, ext_log in extract_results:
         log.extend(ext_log)
 
+        feed_name = (art.section_name or "").replace("WeChat / ", "").strip()
+        wechat_source = f"wechat_rss:{feed_name}" if feed_name else "wechat_rss"
+
         if not article_dict or not article_dict.get("is_relevant"):
-            result.skipped_no_incident += 1
-            if dry_run and article_dict:
-                log.append(
-                    f"  ⛔ 无关: {art.title[:50]} | reason={article_dict.get('reject_reason','')}"
-                )
+            _handle_llm_reject(art, article_dict, source=wechat_source, dry_run=dry_run, result=result)
             continue
 
         if dry_run:
@@ -972,8 +1069,7 @@ async def async_sync_wechat_rss(
             continue
 
         # source 按公众号细分，便于后续按源过滤
-        feed_name = (art.section_name or "").replace("WeChat / ", "").strip()
-        source_tag = f"wechat_rss:{feed_name}" if feed_name else "wechat_rss"
+        source_tag = wechat_source
 
         incident_like = article_dict_to_incident_like(article_dict)
         try:
@@ -1063,21 +1159,48 @@ POLICY_AI_KEYWORDS: Tuple[str, ...] = (
     "model risk",
     "chatbot",
     "foundation model",
+    # 葡语（巴西 LexML 等）
+    "inteligência artificial",
+    "aprendizado de máquina",
+    "aprendizagem de máquina",
 )
+
+# 抓取层已定向或标题语言非英文：跳过关键词预筛，仍走 LLM is_relevant
+POLICY_PREFILTER_SKIP_TAGS: frozenset[str] = frozenset(
+    {"policy:IN", "policy:BR", "policy:EU"}
+)
+
+_POLICY_COUNTRY_CODE: dict[str, str] = {
+    "US": "US",
+    "USA": "US",
+    "UK": "UK",
+    "GB": "UK",
+    "EU": "EU",
+    "EC": "EU",
+    "IN": "IN",
+    "INDIA": "IN",
+    "BR": "BR",
+    "BRAZIL": "BR",
+}
 
 
 def _policy_prefilter_relevant(art: RawArticle) -> bool:
-    """政策源预筛：标题/摘要/正文含 AI 治理相关关键词才进入 LLM。"""
+    """政策源预筛：US/UK 用关键词；IN/BR/EU 跳过预筛交给 LLM。"""
+    tag = _policy_source_tag(art)
+    if tag in POLICY_PREFILTER_SKIP_TAGS:
+        return True
     text = f"{art.title} {art.trail_text or ''} {art.body_text or ''}".lower()
     return any(kw in text for kw in POLICY_AI_KEYWORDS)
 
 
 def _policy_source_tag(art: RawArticle) -> str:
-    """从 section_name 解析 source 标签，如 policy:US。"""
+    """从 section_name 解析 source 标签，如 policy:US（与 source_registry 一致）。"""
     section = art.section_name or ""
     m = re.search(r"Policy\s*/\s*(\w+)", section, re.I)
     if m:
-        return f"policy:{m.group(1).upper()}"
+        raw = m.group(1).upper()
+        code = _POLICY_COUNTRY_CODE.get(raw, raw)
+        return f"policy:{code}"
     return "policy"
 
 
@@ -1092,27 +1215,46 @@ async def async_sync_policy(
     force_reindex: bool = False,
     dry_run: bool = False,
     skip_prefilter: bool = False,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    policy_config: Optional[PolicyConfig] = None,
 ) -> SyncResult:
     """
     功能：多国政策/法规源同步 → LLM 抽取 → articles 入库。
-    输入：countries 默认全池；skip_prefilter 跳过 AI 关键词预筛（调试用）。
+    输入：countries 默认全池；date_from/date_to 启用历史回溯抓取。
     输出：SyncResult；source 为 policy:US 等。
-    上下游：sync_policy、ui_jobs、scripts/sync_sources.py。
+    上下游：sync_policy、backfill_policy_historical.py。
     """
     result = SyncResult()
     log = result.debug_log
     llm_backend = _build_llm_backend(api_key, base_url)
     dry_tag = " [DRY-RUN，不入库]" if dry_run else ""
     countries_desc = "、".join(countries) if countries else "US/UK/EU/IN/BR"
+    window_tag = ""
+    if date_from and date_to:
+        window_tag = f" | 窗 {date_from.isoformat()}..{date_to.isoformat()}"
+
+    cfg = policy_config
+    if cfg is None and date_from and date_to:
+        cfg = build_backfill_policy_config(
+            date_from=date_from,
+            date_to=date_to,
+            max_articles_per_country=max_articles_per_country,
+        )
 
     try:
         log.append(
-            f"📡 拉取政策源（国家：{countries_desc}，每国≤{max_articles_per_country}）{dry_tag}"
+            f"📡 拉取政策源（国家：{countries_desc}，每国≤{max_articles_per_country}）"
+            f"{window_tag}{dry_tag}"
         )
         fetch_result = await asyncio.to_thread(
             fetch_policy_articles,
             countries=countries,
             max_articles_per_country=max_articles_per_country,
+            download_date=date_to or date.today(),
+            config=cfg,
+            date_from=date_from,
+            date_to=date_to,
         )
         articles = fetch_result.articles
         for err in fetch_result.errors:
@@ -1134,8 +1276,13 @@ async def async_sync_policy(
             continue
         seen_urls.add(art.web_url)
         if not skip_prefilter and not _policy_prefilter_relevant(art):
-            result.skipped_no_incident += 1
-            log.append(f"⏭ 预筛无关: {art.title[:55]}")
+            _handle_prefilter_reject(
+                art,
+                source=_policy_source_tag(art),
+                dry_run=dry_run,
+                result=result,
+                log=log,
+            )
             continue
         if not dry_run and _url_already_in_mysql(art.web_url):
             result.skipped_url_dup += 1
@@ -1160,11 +1307,13 @@ async def async_sync_policy(
     for art, article_dict, ext_log in extract_results:
         log.extend(ext_log)
         if not article_dict or not article_dict.get("is_relevant"):
-            result.skipped_no_incident += 1
-            if dry_run and article_dict:
-                log.append(
-                    f"  ⛔ 无关: {art.title[:50]} | reason={article_dict.get('reject_reason', '')}"
-                )
+            _handle_llm_reject(
+                art,
+                article_dict,
+                source=_policy_source_tag(art),
+                dry_run=dry_run,
+                result=result,
+            )
             continue
         if dry_run:
             log.append(f"  ✅ [DRY] {art.title[:50]}")
@@ -1217,6 +1366,9 @@ def sync_policy(
     force_reindex: bool = False,
     dry_run: bool = False,
     skip_prefilter: bool = False,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    policy_config: Optional[PolicyConfig] = None,
 ) -> SyncResult:
     """sync_policy 是 async_sync_policy 的同步包装。"""
     return asyncio.run(
@@ -1230,6 +1382,9 @@ def sync_policy(
             force_reindex=force_reindex,
             dry_run=dry_run,
             skip_prefilter=skip_prefilter,
+            date_from=date_from,
+            date_to=date_to,
+            policy_config=policy_config,
         )
     )
 

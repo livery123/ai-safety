@@ -1,0 +1,4 @@
+# 重大国际会议名录（与 conference_catalog.json 同步；运行时以 JSON 为准）
+# 参考：http://106.12.173.118:8082/static/conference.html
+reference_url: "http://106.12.173.118:8082/static/conference.html"
+# 完整数据见同目录 conference_catalog.json（避免运行时强依赖 PyYAML）

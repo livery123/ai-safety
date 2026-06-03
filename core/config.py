@@ -91,3 +91,30 @@ MYSQL_CHARSET: str = os.getenv("MYSQL_CHARSET", "utf8mb4").strip() or "utf8mb4"
 
 # Structured extraction version for reproducible pipelines.
 EXTRACTOR_VERSION: str = os.getenv("EXTRACTOR_VERSION", "v1").strip() or "v1"
+
+# --- 五国政策源抓取（policy.py）---
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "true" if default else "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+POLICY_EU_DAYS_BACK: int = _env_int("POLICY_EU_DAYS_BACK", 14)
+POLICY_BR_MAX_OFFSETS: int = _env_int("POLICY_BR_MAX_OFFSETS", 20)
+POLICY_BR_LOOKBACK_DAYS: int = _env_int("POLICY_BR_LOOKBACK_DAYS", 120)
+POLICY_EU_FETCH_FULL_TEXT: bool = _env_bool("POLICY_EU_FETCH_FULL_TEXT", True)
+POLICY_US_USE_API: bool = _env_bool("POLICY_US_USE_API", True)
+POLICY_US_API_DAYS_BACK: int = _env_int("POLICY_US_API_DAYS_BACK", 90)
+POLICY_EU_USE_SEARCH: bool = _env_bool("POLICY_EU_USE_SEARCH", True)
+POLICY_IN_MAX_PAGES: int = _env_int("POLICY_IN_MAX_PAGES", 3)
+
+# --- 五国政策历史回溯（backfill_policy_historical.py）---
+BACKFILL_POLICY_TARGET: int = _env_int("BACKFILL_POLICY_TARGET", 1000)
+BACKFILL_POLICY_WINDOW_DAYS: int = _env_int("BACKFILL_POLICY_WINDOW_DAYS", 30)
+BACKFILL_POLICY_MAX_PER_WINDOW: int = _env_int("BACKFILL_POLICY_MAX_PER_WINDOW", 100)

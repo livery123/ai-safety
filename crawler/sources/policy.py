@@ -7,11 +7,11 @@ Policy crawler.
 上下游：crawler.orchestrator.async_sync_policy；下游 articles 表。
 
 信源：
-- US: Federal Register RSS
-- UK: GOV.UK Atom（主）；legislation.gov.uk 在 437 等阻断时自动降级
-- EU: EUR-Lex daily view
-- India: PRS India bill track
-- Brazil: LexML search
+    - US: Federal Register JSON API（AI term，可配置）+ RSS 备选
+    - UK: GOV.UK AI Atom 优先；legislation.gov.uk RSS 补充
+    - EU: EUR-Lex daily view + 可选关键词搜索
+    - India: PRS India bill track（多状态 + 分页）
+    - Brazil: LexML search（葡语 AI 检索词）
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Iterable, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import quote_plus, urljoin
 
 import feedparser
 import httpx
@@ -37,6 +37,14 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+# 印度 PRS 法案状态：Passed 以外亦可能含 AI 相关立法进程
+INDIA_ALLOWED_STATUSES: frozenset[str] = frozenset(
+    {"Passed", "Introduced", "Pending", "Lapsed", "Withdrawn"}
+)
+
+# LexML 葡语 AI 检索词（URL 编码前）
+BRAZIL_LEXML_AI_QUERY = "inteligência artificial"
 
 
 @dataclass(frozen=True)
@@ -71,14 +79,85 @@ class PolicyConfig:
     retry_count: int = 3
     retry_delay_sec: float = 3.0
     page_delay_sec: float = 0.5
-    eu_days_back: int = 3
-    brazil_start_days_back: int = 5
-    brazil_end_days_back: int = 9
-    brazil_max_offsets_per_day: int = 3
+    eu_days_back: int = 14
+    brazil_max_offsets_per_day: int = 20
     brazil_lookback_days: int = 120
     max_articles_per_country: int = 30
     user_agent: str = DEFAULT_USER_AGENT
     fetch_eu_full_text: bool = True
+    us_use_api: bool = True
+    us_api_days_back: int = 90
+    eu_use_search: bool = True
+    india_max_pages: int = 3
+    india_allowed_statuses: frozenset[str] = INDIA_ALLOWED_STATUSES
+    backfill_mode: bool = False
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    us_fr_search_term: str = "artificial intelligence"
+
+
+def policy_config_from_env() -> PolicyConfig:
+    """
+    功能：从 core.config / 环境变量构建 PolicyConfig。
+    输入：POLICY_* 环境变量（可选）。
+    输出：PolicyConfig 实例；无副作用。
+    上下游：fetch_policy_articles、诊断脚本。
+    """
+    try:
+        from core import config as app_config
+    except ImportError:
+        return PolicyConfig()
+
+    return PolicyConfig(
+        eu_days_back=getattr(app_config, "POLICY_EU_DAYS_BACK", 14),
+        brazil_max_offsets_per_day=getattr(app_config, "POLICY_BR_MAX_OFFSETS", 20),
+        brazil_lookback_days=getattr(app_config, "POLICY_BR_LOOKBACK_DAYS", 120),
+        fetch_eu_full_text=getattr(app_config, "POLICY_EU_FETCH_FULL_TEXT", True),
+        us_use_api=getattr(app_config, "POLICY_US_USE_API", True),
+        us_api_days_back=getattr(app_config, "POLICY_US_API_DAYS_BACK", 90),
+        eu_use_search=getattr(app_config, "POLICY_EU_USE_SEARCH", True),
+        india_max_pages=getattr(app_config, "POLICY_IN_MAX_PAGES", 3),
+    )
+
+
+def build_backfill_policy_config(
+    *,
+    date_from: date,
+    date_to: date,
+    max_articles_per_country: int,
+    fetch_eu_full_text: bool = False,
+) -> PolicyConfig:
+    """
+    功能：构造历史回溯专用 PolicyConfig。
+    输入：date_from/date_to 时间窗、每国条数上限。
+    输出：PolicyConfig（禁用 EU 全文、按窗逐日抓取）。
+    上下游：backfill_policy_historical.py、orchestrator.async_sync_policy。
+    """
+    if date_to < date_from:
+        date_from, date_to = date_to, date_from
+    window_days = max(1, (date_to - date_from).days + 1)
+    base = policy_config_from_env()
+    return PolicyConfig(
+        timeout_sec=base.timeout_sec,
+        retry_count=base.retry_count,
+        retry_delay_sec=base.retry_delay_sec,
+        page_delay_sec=base.page_delay_sec,
+        eu_days_back=window_days,
+        brazil_max_offsets_per_day=max(30, base.brazil_max_offsets_per_day),
+        brazil_lookback_days=window_days + 90,
+        max_articles_per_country=max(1, max_articles_per_country),
+        user_agent=base.user_agent,
+        fetch_eu_full_text=fetch_eu_full_text,
+        us_use_api=True,
+        us_api_days_back=window_days,
+        eu_use_search=False,
+        india_max_pages=max(5, base.india_max_pages),
+        india_allowed_statuses=base.india_allowed_statuses,
+        backfill_mode=True,
+        date_from=date_from,
+        date_to=date_to,
+        us_fr_search_term=base.us_fr_search_term,
+    )
 
 
 class PolicyError(Exception):
@@ -95,6 +174,7 @@ class PolicySubscriber:
     DEFAULT_COUNTRIES = ["US", "UK", "EU", "IN", "BR"]
 
     FEDERAL_REGISTER_RSS = "https://www.federalregister.gov/api/v1/documents.rss"
+    FEDERAL_REGISTER_API = "https://www.federalregister.gov/api/v1/documents.json"
     UK_LEGISLATION_RSS = "https://www.legislation.gov.uk/new/data.feed"
     UK_GOVUK_POLICY_ATOM = (
         "https://www.gov.uk/search/policy-papers-and-consultations.atom?order=updated-newest"
@@ -111,6 +191,31 @@ class PolicySubscriber:
 
     def __init__(self, config: Optional[PolicyConfig] = None) -> None:
         self.config = config or PolicyConfig()
+
+    def _backfill_window(self) -> Tuple[Optional[date], Optional[date]]:
+        """回溯模式下的 [date_from, date_to]。"""
+        if not self.config.backfill_mode:
+            return None, None
+        return self.config.date_from, self.config.date_to
+
+    @classmethod
+    def _article_pub_date(cls, art: RawArticle) -> Optional[date]:
+        raw = art.web_publication_date
+        if not raw:
+            return None
+        return cls._parse_date(str(raw))
+
+    def _filter_window(self, articles: List[RawArticle]) -> List[RawArticle]:
+        """回溯模式下按发布日期过滤；无日期条目保留供 LLM 判断。"""
+        df, dt = self._backfill_window()
+        if not df or not dt:
+            return articles
+        kept: List[RawArticle] = []
+        for art in articles:
+            pub = self._article_pub_date(art)
+            if pub is None or (df <= pub <= dt):
+                kept.append(art)
+        return kept
 
     def subscribe(
         self,
@@ -179,7 +284,15 @@ class PolicySubscriber:
             return self.subscribe_eu(client=client, download_date=download_date)
 
         if country in {"IN", "INDIA"}:
-            return self.subscribe_india(client=client)
+            page = self.subscribe_india(client=client)
+            filtered = self._filter_window(page.articles)[: self.config.max_articles_per_country]
+            return PolicyPage(
+                articles=filtered,
+                article_urls=[a.web_url for a in filtered],
+                page_url=page.page_url,
+                status_code=page.status_code,
+                country=page.country,
+            )
 
         if country in {"BR", "BRAZIL"}:
             return self.subscribe_brazil(client=client, download_date=download_date)
@@ -187,74 +300,216 @@ class PolicySubscriber:
         raise PolicyError(f"Unknown country/source: {country}")
 
     # ------------------------------------------------------------------
-    # US: Federal Register RSS
+    # US: Federal Register API（AI term）+ RSS 备选
     # ------------------------------------------------------------------
 
     def subscribe_us(self, *, client: httpx.Client) -> PolicyPage:
+        """
+        功能：拉取美国联邦公报 AI 相关公告。
+        输入：client；config.us_use_api 为真时走 JSON API，否则 RSS。
+        输出：PolicyPage。
+        """
+        cap = max(0, int(self.config.max_articles_per_country))
+        if self.config.us_use_api or self.config.backfill_mode:
+            try:
+                page = self.subscribe_us_api(client=client)
+                if page.articles:
+                    return page
+            except PolicyError:
+                if self.config.backfill_mode:
+                    raise
+
         return self._subscribe_feed(
             client=client,
             feed_url=self.FEDERAL_REGISTER_RSS,
             country="US",
             section_name="Policy / US / Federal Register",
+            limit_remaining=cap,
         )
 
-    # ------------------------------------------------------------------
-    # UK: GOV.UK Atom（legislation.gov.uk 常被 437 阻断）
-    # ------------------------------------------------------------------
+    def subscribe_us_api(
+        self,
+        *,
+        client: httpx.Client,
+        download_date: Optional[date] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+    ) -> PolicyPage:
+        """Federal Register documents.json：按关键词与发布日期范围检索（支持多页）。"""
+        cap = max(0, int(self.config.max_articles_per_country))
+        df, dt = self._backfill_window()
+        start = date_from or df
+        end = date_to or dt or download_date or date.today()
+        if start is None:
+            start = end - timedelta(days=max(7, int(self.config.us_api_days_back)))
 
-    def subscribe_uk(self, *, client: httpx.Client) -> PolicyPage:
-        """
-        功能：拉取英国政策条目。
-        优先 legislation.gov.uk；若 HTTP 437/403 等则改用 GOV.UK Atom。
-        """
-        try:
-            return self._subscribe_feed(
-                client=client,
-                feed_url=self.UK_LEGISLATION_RSS,
-                country="UK",
-                section_name="Policy / UK / legislation.gov.uk",
-            )
-        except PolicyError as exc:
-            blocked = exc.status_code in {403, 429, 437} or "437" in str(exc)
-            if not blocked:
-                raise
-
+        term = quote_plus(self.config.us_fr_search_term or "artificial intelligence")
         articles: List[RawArticle] = []
-        page_urls: List[str] = []
+        page_num = 1
+        api_urls: List[str] = []
         latest_status = 200
-        seen: set[str] = set()
+        per_page = min(100, max(cap, 20))
 
-        for feed_url, section in (
-            (self.UK_GOVUK_AI_ATOM, "Policy / UK / GOV.UK AI"),
-            (self.UK_GOVUK_POLICY_ATOM, "Policy / UK / GOV.UK Policy"),
-        ):
-            page = self._subscribe_feed(
-                client=client,
-                feed_url=feed_url,
-                country="UK",
-                section_name=section,
-                limit_remaining=max(0, self.config.max_articles_per_country - len(articles)),
-            )
-            page_urls.append(page.page_url)
-            latest_status = page.status_code
-            for art in page.articles:
-                if art.web_url in seen:
-                    continue
-                seen.add(art.web_url)
-                articles.append(art)
-                if len(articles) >= self.config.max_articles_per_country:
-                    break
-            if len(articles) >= self.config.max_articles_per_country:
+        while len(articles) < cap:
+            query_parts = [
+                f"conditions[term]={term}",
+                f"conditions[publication_date][gte]={start.isoformat()}",
+                f"conditions[publication_date][lte]={end.isoformat()}",
+                f"per_page={per_page}",
+                f"page={page_num}",
+                "order=newest",
+                "fields[]=title",
+                "fields[]=html_url",
+                "fields[]=publication_date",
+                "fields[]=abstract",
+            ]
+            api_url = f"{self.FEDERAL_REGISTER_API}?{'&'.join(query_parts)}"
+            api_urls.append(api_url)
+
+            raw_text, status_code = self._request_text_with_retry(client, api_url)
+            latest_status = status_code
+            try:
+                payload = json.loads(raw_text)
+            except json.JSONDecodeError as exc:
+                raise PolicyError(f"Federal Register API invalid JSON: {exc}") from exc
+
+            results = payload.get("results") or []
+            if not results:
                 break
 
+            for doc in results:
+                if len(articles) >= cap:
+                    break
+                title = self._clean_text(str(doc.get("title") or ""))
+                url = self._clean_text(str(doc.get("html_url") or ""))
+                if not title or not url:
+                    continue
+                abstract = self._clean_text(str(doc.get("abstract") or ""))
+                pub = self._clean_text(str(doc.get("publication_date") or ""))
+                metadata = self._build_metadata(country="US", creator="", source="Federal Register")
+                body_text = abstract or title
+                if metadata:
+                    body_text = f"{abstract}\n\n{metadata}" if abstract else metadata
+
+                articles.append(
+                    RawArticle(
+                        web_url=url,
+                        title=title,
+                        trail_text=abstract or title,
+                        body_text=body_text or None,
+                        web_publication_date=pub or None,
+                        section_name="Policy / US / Federal Register API",
+                        api_url=api_url,
+                        guardian_id=None,
+                    )
+                )
+
+            total_pages = int(payload.get("total_pages") or 1)
+            if page_num >= total_pages:
+                break
+            page_num += 1
+            time.sleep(max(0.0, self.config.page_delay_sec))
+
+        articles = self._filter_window(articles)[:cap]
         if not articles:
             raise PolicyError(
-                "UK policy feeds unavailable (legislation.gov.uk blocked and GOV.UK empty)"
+                f"Federal Register API returned no documents for {start}..{end}"
             )
 
         return PolicyPage(
             articles=articles,
             article_urls=[a.web_url for a in articles],
+            page_url=",".join(api_urls[:3]),
+            status_code=latest_status,
+            country="US",
+        )
+
+    # ------------------------------------------------------------------
+    # UK: GOV.UK AI Atom 优先；legislation.gov.uk RSS 补充
+    # ------------------------------------------------------------------
+
+    def subscribe_uk(self, *, client: httpx.Client) -> PolicyPage:
+        """
+        功能：拉取英国政策条目。
+        回溯模式：GOV.UK Atom 带 public_timestamp 窗；增量优先 AI Atom。
+        """
+        articles: List[RawArticle] = []
+        page_urls: List[str] = []
+        latest_status = 200
+        seen: set[str] = set()
+        cap = max(0, int(self.config.max_articles_per_country))
+        df, dt = self._backfill_window()
+
+        feed_specs: List[Tuple[str, str]] = []
+        if df and dt:
+            ts_from = df.isoformat()
+            ts_to = dt.isoformat()
+            feed_specs = [
+                (
+                    f"{self.UK_GOVUK_AI_ATOM}&public_timestamp[from]={ts_from}&public_timestamp[to]={ts_to}",
+                    "Policy / UK / GOV.UK AI",
+                ),
+                (
+                    f"{self.UK_GOVUK_POLICY_ATOM}&public_timestamp[from]={ts_from}&public_timestamp[to]={ts_to}",
+                    "Policy / UK / GOV.UK Policy",
+                ),
+            ]
+        else:
+            feed_specs = [
+                (self.UK_GOVUK_AI_ATOM, "Policy / UK / GOV.UK AI"),
+                (self.UK_GOVUK_POLICY_ATOM, "Policy / UK / GOV.UK Policy"),
+            ]
+
+        for feed_url, section in feed_specs:
+            if len(articles) >= cap:
+                break
+            try:
+                page = self._subscribe_feed(
+                    client=client,
+                    feed_url=feed_url,
+                    country="UK",
+                    section_name=section,
+                    limit_remaining=cap - len(articles),
+                )
+            except PolicyError:
+                continue
+            page_urls.append(page.page_url)
+            latest_status = page.status_code
+            for art in self._filter_window(page.articles):
+                if art.web_url in seen:
+                    continue
+                seen.add(art.web_url)
+                articles.append(art)
+                if len(articles) >= cap:
+                    break
+
+        if len(articles) < cap and not (df and dt):
+            try:
+                leg_page = self._subscribe_feed(
+                    client=client,
+                    feed_url=self.UK_LEGISLATION_RSS,
+                    country="UK",
+                    section_name="Policy / UK / legislation.gov.uk",
+                    limit_remaining=cap - len(articles),
+                )
+                page_urls.append(leg_page.page_url)
+                latest_status = leg_page.status_code
+                for art in self._filter_window(leg_page.articles):
+                    if art.web_url in seen:
+                        continue
+                    seen.add(art.web_url)
+                    articles.append(art)
+                    if len(articles) >= cap:
+                        break
+            except PolicyError:
+                pass
+
+        if not articles:
+            raise PolicyError("UK policy feeds unavailable (GOV.UK and legislation.gov.uk empty)")
+
+        return PolicyPage(
+            articles=articles[:cap],
+            article_urls=[a.web_url for a in articles[:cap]],
             page_url=",".join(page_urls),
             status_code=latest_status,
             country="UK",
@@ -309,46 +564,185 @@ class PolicySubscriber:
         client: httpx.Client,
         download_date: date,
     ) -> PolicyPage:
+        """
+        功能：EUR-Lex 关键词搜索 + daily-view 按日补充。
+        输入：download_date 为基准日；eu_days_back 控制回溯天数。
+        输出：PolicyPage；不在抓取层做 AI 标题硬过滤。
+        """
         articles: List[RawArticle] = []
         page_urls: List[str] = []
         latest_status_code = 200
         cap = max(0, int(self.config.max_articles_per_country))
+        seen: set[str] = set()
+        df, dt = self._backfill_window()
 
-        for offset in range(1, self.config.eu_days_back + 1):
-            if len(articles) >= cap:
-                break
+        if not (df and dt):
+            if self.config.eu_use_search and cap > 0:
+                try:
+                    search_page = self._subscribe_eu_search(client=client, max_items=cap)
+                    page_urls.append(search_page.page_url)
+                    latest_status_code = search_page.status_code
+                    for art in search_page.articles:
+                        if art.web_url in seen:
+                            continue
+                        seen.add(art.web_url)
+                        articles.append(art)
+                except PolicyError:
+                    pass
 
-            target_date = download_date - timedelta(days=offset)
-            oj_date = target_date.strftime("%d%m%Y")
-            pub_date = target_date.isoformat()
-
-            page_url = (
-                f"{self.EUR_LEX_BASE}/oj/daily-view/L-series/default.html"
-                f"?ojDate={oj_date}"
-            )
-            page_urls.append(page_url)
-
-            html, status_code = self._request_text_with_retry(client, page_url)
-            latest_status_code = status_code
-
-            soup = BeautifulSoup(html, "html.parser")
-            articles.extend(
-                self._parse_eu_daily_view(
-                    soup,
+            for offset in range(1, self.config.eu_days_back + 1):
+                if len(articles) >= cap:
+                    break
+                target_date = download_date - timedelta(days=offset)
+                self._eu_daily_view_for_date(
                     client=client,
-                    page_url=page_url,
-                    pub_date=pub_date,
-                    max_items=cap - len(articles),
+                    target_date=target_date,
+                    articles=articles,
+                    seen=seen,
+                    page_urls=page_urls,
+                    cap=cap,
+                    latest_status_code_ref=[latest_status_code],
                 )
-            )
-
-            time.sleep(max(0.0, self.config.page_delay_sec))
+        else:
+            day_cursor = df
+            while day_cursor <= dt and len(articles) < cap:
+                self._eu_daily_view_for_date(
+                    client=client,
+                    target_date=day_cursor,
+                    articles=articles,
+                    seen=seen,
+                    page_urls=page_urls,
+                    cap=cap,
+                    latest_status_code_ref=[latest_status_code],
+                )
+                day_cursor += timedelta(days=1)
 
         return PolicyPage(
             articles=articles[:cap],
             article_urls=[article.web_url for article in articles[:cap]],
-            page_url=",".join(page_urls),
+            page_url=",".join(page_urls[:5]),
             status_code=latest_status_code,
+            country="EU",
+        )
+
+    def _eu_daily_view_for_date(
+        self,
+        *,
+        client: httpx.Client,
+        target_date: date,
+        articles: List[RawArticle],
+        seen: set[str],
+        page_urls: List[str],
+        cap: int,
+        latest_status_code_ref: List[int],
+    ) -> None:
+        """单日 EUR-Lex daily-view 解析并追加到 articles。"""
+        if len(articles) >= cap:
+            return
+        oj_date = target_date.strftime("%d%m%Y")
+        pub_date = target_date.isoformat()
+        page_url = (
+            f"{self.EUR_LEX_BASE}/oj/daily-view/L-series/default.html"
+            f"?ojDate={oj_date}"
+        )
+        page_urls.append(page_url)
+        html, status_code = self._request_text_with_retry(client, page_url)
+        latest_status_code_ref[0] = status_code
+        soup = BeautifulSoup(html, "html.parser")
+        for art in self._parse_eu_daily_view(
+            soup,
+            client=client,
+            page_url=page_url,
+            pub_date=pub_date,
+            max_items=cap - len(articles),
+        ):
+            if art.web_url in seen:
+                continue
+            seen.add(art.web_url)
+            articles.append(art)
+            if len(articles) >= cap:
+                break
+        time.sleep(max(0.0, self.config.page_delay_sec))
+
+    def _subscribe_eu_search(
+        self,
+        *,
+        client: httpx.Client,
+        max_items: int,
+    ) -> PolicyPage:
+        """EUR-Lex 快速搜索：artificial intelligence / AI Act 相关法规。"""
+        search_url = (
+            f"{self.EUR_LEX_BASE}/search.html"
+            f"?scope=EURLEX&type=quick&lang=en"
+            f"&text={quote_plus('artificial intelligence')}"
+            f"&sortOne=DD&sortOneOrder=desc"
+        )
+        html, status_code = self._request_text_with_retry(client, search_url)
+        soup = BeautifulSoup(html, "html.parser")
+        articles: List[RawArticle] = []
+        seen: set[str] = set()
+
+        for link in soup.select("a.title"):
+            if len(articles) >= max_items:
+                break
+            title = self._clean_text(link.get_text(" "))
+            href = link.get("href", "")
+            if not title or not href:
+                continue
+            full_url = urljoin(self.EUR_LEX_BASE, href)
+            if full_url in seen:
+                continue
+            seen.add(full_url)
+            summary = ""
+            if self.config.fetch_eu_full_text:
+                summary = self._fetch_eu_summary(client, full_url)
+            articles.append(
+                RawArticle(
+                    web_url=full_url,
+                    title=title,
+                    trail_text=summary or title,
+                    body_text=summary or title,
+                    web_publication_date=None,
+                    section_name="Policy / EU / EUR-Lex Search",
+                    api_url=search_url,
+                    guardian_id=None,
+                )
+            )
+
+        # 备选选择器（EUR-Lex 页面结构可能变化）
+        if not articles:
+            for row in soup.select("div.SearchResult"):
+                if len(articles) >= max_items:
+                    break
+                link_node = row.select_one("a")
+                if not link_node:
+                    continue
+                title = self._clean_text(link_node.get_text(" "))
+                href = link_node.get("href", "")
+                if not title or not href:
+                    continue
+                full_url = urljoin(self.EUR_LEX_BASE, href)
+                if full_url in seen:
+                    continue
+                seen.add(full_url)
+                articles.append(
+                    RawArticle(
+                        web_url=full_url,
+                        title=title,
+                        trail_text=title,
+                        body_text=title,
+                        web_publication_date=None,
+                        section_name="Policy / EU / EUR-Lex Search",
+                        api_url=search_url,
+                        guardian_id=None,
+                    )
+                )
+
+        return PolicyPage(
+            articles=articles,
+            article_urls=[a.web_url for a in articles],
+            page_url=search_url,
+            status_code=status_code,
             country="EU",
         )
 
@@ -426,53 +820,71 @@ class PolicySubscriber:
     # ------------------------------------------------------------------
 
     def subscribe_india(self, *, client: httpx.Client) -> PolicyPage:
-        html, status_code = self._request_text_with_retry(
-            client,
-            self.PRS_BILL_TRACK_URL,
-        )
-
-        soup = BeautifulSoup(html, "html.parser")
+        """
+        功能：PRS India 法案追踪（多状态 + 分页）。
+        输入：config.india_allowed_statuses、india_max_pages。
+        输出：PolicyPage；详情页正文供 LLM 质检。
+        """
         articles: List[RawArticle] = []
+        page_urls: List[str] = []
+        latest_status = 200
         cap = max(0, int(self.config.max_articles_per_country))
+        allowed = self.config.india_allowed_statuses
 
-        for row in soup.select("#parliament_view div.views-row"):
+        for page_idx in range(max(1, int(self.config.india_max_pages))):
             if len(articles) >= cap:
                 break
 
-            status = self._clean_text(
-                row.select_one(".views-field-field-bill-status").get_text(" ")
-            ) if row.select_one(".views-field-field-bill-status") else ""
+            page_url = self.PRS_BILL_TRACK_URL if page_idx == 0 else f"{self.PRS_BILL_TRACK_URL}?page={page_idx}"
+            html, status_code = self._request_text_with_retry(client, page_url)
+            latest_status = status_code
+            page_urls.append(page_url)
 
-            if status != "Passed":
-                continue
+            soup = BeautifulSoup(html, "html.parser")
+            rows = soup.select("#parliament_view div.views-row")
+            if not rows:
+                break
 
-            title_node = row.select_one(".views-field-title-field a")
-            if not title_node:
-                continue
+            for row in rows:
+                if len(articles) >= cap:
+                    break
 
-            title = self._clean_text(title_node.get_text(" "))
-            href = title_node.get("href", "")
+                status = self._clean_text(
+                    row.select_one(".views-field-field-bill-status").get_text(" ")
+                ) if row.select_one(".views-field-field-bill-status") else ""
 
-            if not title or not href:
-                continue
+                if status and status not in allowed:
+                    continue
 
-            full_url = urljoin(self.PRS_BASE, href)
-            articles.append(
-                self._fetch_india_detail(
-                    client=client,
-                    url=full_url,
-                    title=title,
+                title_node = row.select_one(".views-field-title-field a")
+                if not title_node:
+                    continue
+
+                title = self._clean_text(title_node.get_text(" "))
+                href = title_node.get("href", "")
+
+                if not title or not href:
+                    continue
+
+                full_url = urljoin(self.PRS_BASE, href)
+                articles.append(
+                    self._fetch_india_detail(
+                        client=client,
+                        url=full_url,
+                        title=title,
+                    )
                 )
-            )
 
-            if len(articles) < cap:
-                time.sleep(max(0.0, self.config.page_delay_sec))
+                if len(articles) < cap:
+                    time.sleep(max(0.0, self.config.page_delay_sec))
+
+            time.sleep(max(0.0, self.config.page_delay_sec))
 
         return PolicyPage(
             articles=articles,
             article_urls=[article.web_url for article in articles],
-            page_url=self.PRS_BILL_TRACK_URL,
-            status_code=status_code,
+            page_url=",".join(page_urls),
+            status_code=latest_status,
             country="IN",
         )
 
@@ -540,14 +952,22 @@ class PolicySubscriber:
         download_date: date,
     ) -> PolicyPage:
         """
-        功能：LexML 立法检索（按更新时间倒序分页，客户端按日期过滤）。
-        LexML 的 f3-date 过滤器对近几日条目常返回空，故不用该参数。
+        功能：LexML 立法检索（葡语 AI 关键词 + 分页）。
+        输入：download_date 用于 lookback 过滤；brazil_max_offsets_per_day 控制分页深度。
+        输出：PolicyPage。
         """
         articles: List[RawArticle] = []
         page_urls: List[str] = []
         latest_status_code = 200
         cap = max(0, int(self.config.max_articles_per_country))
-        cutoff = download_date - timedelta(days=max(7, int(self.config.brazil_lookback_days)))
+        df, dt = self._backfill_window()
+        if df and dt:
+            cutoff = df
+            upper = dt
+        else:
+            cutoff = download_date - timedelta(days=max(7, int(self.config.brazil_lookback_days)))
+            upper = download_date
+        ai_term = quote_plus(BRAZIL_LEXML_AI_QUERY)
 
         offset = 1
         offset_count = 0
@@ -558,7 +978,8 @@ class PolicySubscriber:
 
             page_url = (
                 f"{self.LEXML_BASE}/busca/search"
-                f"?sort=reverse-year"
+                f"?keyword={ai_term}"
+                f";sort=reverse-year"
                 f";f2-tipoDocumento=Legisla%C3%A7%C3%A3o"
                 f";startDoc={offset}"
             )
@@ -569,6 +990,20 @@ class PolicySubscriber:
 
             soup = BeautifulSoup(html, "html.parser")
             hits = soup.select("div.docHit")
+
+            # LexML 的 f1-texto 已失效；keyword 无结果时回退全量立法检索（预筛已跳过，由 LLM 质检）
+            if not hits and offset == 1:
+                fallback_url = (
+                    f"{self.LEXML_BASE}/busca/search"
+                    f"?sort=reverse-year"
+                    f";f2-tipoDocumento=Legisla%C3%A7%C3%A3o"
+                    f";startDoc={offset}"
+                )
+                page_urls.append(fallback_url)
+                html, status_code = self._request_text_with_retry(client, fallback_url)
+                latest_status_code = status_code
+                soup = BeautifulSoup(html, "html.parser")
+                hits = soup.select("div.docHit")
 
             if not hits:
                 break
@@ -582,15 +1017,18 @@ class PolicySubscriber:
                 pub = self._parse_date(article.web_publication_date or "")
                 if pub and pub < cutoff:
                     continue
+                if pub and pub > upper:
+                    continue
                 articles.append(article)
 
             offset += 20
             offset_count += 1
             time.sleep(max(0.0, self.config.page_delay_sec))
 
+        filtered = self._filter_window(articles)[:cap]
         return PolicyPage(
-            articles=articles[:cap],
-            article_urls=[article.web_url for article in articles[:cap]],
+            articles=filtered,
+            article_urls=[article.web_url for article in filtered],
             page_url=",".join(page_urls),
             status_code=latest_status_code,
             country="BR",
@@ -868,24 +1306,53 @@ def fetch_policy_articles(
     countries: Optional[Iterable[str]] = None,
     max_articles_per_country: int = 30,
     download_date: Optional[date] = None,
+    config: Optional[PolicyConfig] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
 ) -> PolicyFetchResult:
     """
     功能：拉取多国政策源并返回 PolicyFetchResult。
-    输入：countries 默认 PolicySubscriber.DEFAULT_COUNTRIES；max_articles_per_country 单国上限。
+    输入：countries 默认全池；date_from/date_to 触发回溯配置。
     输出：PolicyFetchResult（articles + errors）；副作用：HTTP 请求。
     上下游：crawler.orchestrator.async_sync_policy。
     """
-    cfg = PolicyConfig(max_articles_per_country=max(1, max_articles_per_country))
+    if config is None and date_from and date_to:
+        config = build_backfill_policy_config(
+            date_from=date_from,
+            date_to=date_to,
+            max_articles_per_country=max_articles_per_country,
+        )
+    base = config or policy_config_from_env()
+    cfg = PolicyConfig(
+        timeout_sec=base.timeout_sec,
+        retry_count=base.retry_count,
+        retry_delay_sec=base.retry_delay_sec,
+        page_delay_sec=base.page_delay_sec,
+        eu_days_back=base.eu_days_back,
+        brazil_max_offsets_per_day=base.brazil_max_offsets_per_day,
+        brazil_lookback_days=base.brazil_lookback_days,
+        max_articles_per_country=max(1, max_articles_per_country),
+        user_agent=base.user_agent,
+        fetch_eu_full_text=base.fetch_eu_full_text,
+        us_use_api=base.us_use_api,
+        us_api_days_back=base.us_api_days_back,
+        eu_use_search=base.eu_use_search,
+        india_max_pages=base.india_max_pages,
+        india_allowed_statuses=base.india_allowed_statuses,
+        backfill_mode=base.backfill_mode,
+        date_from=base.date_from,
+        date_to=base.date_to,
+        us_fr_search_term=base.us_fr_search_term,
+    )
+    effective_date = download_date or cfg.date_to or date.today()
     sub = PolicySubscriber(cfg)
-    return sub.subscribe(countries=countries, download_date=download_date)
+    return sub.subscribe(countries=countries, download_date=effective_date)
 
 
 def main() -> None:
     config = PolicyConfig(
         max_articles_per_country=3,
-        eu_days_back=1,
-        brazil_start_days_back=5,
-        brazil_end_days_back=5,
+        eu_days_back=2,
         brazil_max_offsets_per_day=1,
     )
 

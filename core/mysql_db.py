@@ -6,6 +6,7 @@ Provides CRUD helpers for:
 - one metadata row per article (article_extractions, upsert by article_id)
 - article chunks (vector bridge)
 - research reports and citations
+- unmatched_articles（LLM/预筛未命中审计，按 normalized_url 幂等 upsert）
 """
 
 from __future__ import annotations
@@ -51,6 +52,12 @@ def normalize_url(url: str) -> str:
 def compute_content_hash(title: str, summary: str, content: str) -> str:
     raw = "\n".join([(title or "").strip(), (summary or "").strip(), (content or "").strip()])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+# unmatched_articles.content_preview 上限（仅存摘要/正文片段，便于人工抽检）
+_UNMATCHED_PREVIEW_MAX = 2000
+
+_VALID_REJECT_STAGES = frozenset({"fetch", "llm", "dedup", "manual"})
 
 
 @contextmanager
@@ -138,6 +145,97 @@ def save_article(
                 ),
             )
             return int(cur.lastrowid), True
+
+
+def build_unmatched_content_preview(
+    summary: str = "",
+    content: str = "",
+    *,
+    max_chars: int = _UNMATCHED_PREVIEW_MAX,
+) -> str:
+    """
+    功能：拼接导语与正文片段，供 unmatched_articles.content_preview 写入。
+    输入：summary、content 字符串；max_chars 截断上限。
+    输出：截断后的预览文本。
+    """
+    s = (summary or "").strip()
+    c = (content or "").strip()
+    if s and c and c != s:
+        preview = f"{s}\n\n{c}"
+    else:
+        preview = s or c
+    limit = max(256, int(max_chars))
+    if len(preview) > limit:
+        return preview[:limit]
+    return preview
+
+
+def save_unmatched_article(
+    url: str,
+    *,
+    source: str = "",
+    title: str = "",
+    summary: str = "",
+    content_preview: str = "",
+    published_at: Optional[datetime] = None,
+    section_name: str = "",
+    reject_stage: str = "llm",
+    reject_reason: str = "",
+) -> Tuple[int, bool]:
+    """
+    功能：未命中审计行 upsert（按 normalized_url 唯一）；重复 URL 更新 stage/reason/preview。
+    输入：原始 URL、信源、标题/摘要/预览、reject_stage（fetch|llm|dedup|manual）、reject_reason。
+    输出：(row_id, is_new)；副作用：写 unmatched_articles。
+    上下游：crawler/orchestrator 在 LLM 判无关或预筛跳过时调用。
+    """
+    normalized_url = normalize_url(url)
+    if not normalized_url:
+        raise ValueError("url is required")
+    stage = (reject_stage or "llm").strip().lower()
+    if stage not in _VALID_REJECT_STAGES:
+        raise ValueError(f"invalid reject_stage: {reject_stage}")
+    reason = (reject_reason or "").strip()[:255]
+    preview = (content_preview or "").strip()
+    if len(preview) > _UNMATCHED_PREVIEW_MAX:
+        preview = preview[:_UNMATCHED_PREVIEW_MAX]
+    content_hash = compute_content_hash(title, summary, preview)
+
+    with mysql_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO unmatched_articles (
+                    normalized_url, source, title_raw, summary_raw, content_preview,
+                    published_at, section_name, content_hash,
+                    reject_stage, reject_reason
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    source = VALUES(source),
+                    title_raw = VALUES(title_raw),
+                    summary_raw = VALUES(summary_raw),
+                    content_preview = VALUES(content_preview),
+                    published_at = VALUES(published_at),
+                    section_name = VALUES(section_name),
+                    content_hash = VALUES(content_hash),
+                    reject_stage = VALUES(reject_stage),
+                    reject_reason = VALUES(reject_reason),
+                    id = LAST_INSERT_ID(id)
+                """,
+                (
+                    normalized_url,
+                    (source or "").strip()[:128],
+                    (title or "").strip()[:1024],
+                    (summary or "").strip() or None,
+                    preview or None,
+                    published_at,
+                    (section_name or "").strip()[:255],
+                    content_hash,
+                    stage,
+                    reason,
+                ),
+            )
+            is_new = cur.rowcount == 1
+            return int(cur.lastrowid), is_new
 
 
 def save_extraction(
