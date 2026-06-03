@@ -294,9 +294,14 @@ def _work_news_bundle_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         policy_max_articles_per_country=int(payload.get("policy_max_articles_per_country", 10)),
         rag_enabled=bool(payload.get("rag_enabled", False)),
     )
+    from datetime import datetime
+
+    run_started = datetime.now()
     bundle = sync_all_news_for_policy_meeting(cfg, dry_run=bool(payload.get("dry_run", False)))
     if not bool(payload.get("dry_run", False)):
-        record_news_bundle_tasks(bundle, trigger_source="manual")
+        record_news_bundle_tasks(
+            bundle, trigger_source="manual", run_started_at=run_started
+        )
     out = _sync_result_dict(bundle.merged)
     out["by_source"] = {k: _sync_result_dict(v) for k, v in bundle.by_source.items()}
     return out
@@ -309,7 +314,9 @@ def _work_agent_scout(payload: Dict[str, Any]) -> Dict[str, Any]:
     from crawler.agentic_crawl import run_agentic_crawl
     from core.db import incident_from_extraction, save_incident
 
-    incidents, new_kws, dbg = asyncio.run(run_agentic_crawl(url, api_key=api_key, base_url=base_url))
+    _art, incidents, new_kws, dbg = asyncio.run(
+        run_agentic_crawl(url, api_key=api_key, base_url=base_url)
+    )
     saved = 0
     for inc in incidents:
         try:

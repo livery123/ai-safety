@@ -268,6 +268,10 @@ def save_extraction(
     pub_country = str(d.get("publish_country") or "").strip()[:64] or None
     pub_region = str(d.get("publish_region") or "").strip()[:128] or None
     pub_authority = str(d.get("publish_authority") or "").strip()[:256] or None
+    meeting_catalog_key = str(d.get("meeting_catalog_key") or "").strip()[:64] or None
+    meeting_phase = str(d.get("meeting_phase") or "").strip()[:16] or None
+    if meeting_phase and meeting_phase not in ("pre", "during", "post", "unknown"):
+        meeting_phase = None
 
     with mysql_conn() as conn:
         with conn.cursor() as cur:
@@ -278,11 +282,11 @@ def save_extraction(
                     risk_domain, risk_subdomains_json, entities_json,
                     summary_structured, tags_raw,
                     publish_country, publish_region, international_orgs_json,
-                    publish_authority
+                    publish_authority, meeting_catalog_key, meeting_phase
                 ) VALUES (
                     %s, %s, %s, %s, %s, CAST(%s AS JSON), CAST(%s AS JSON),
                     %s, CAST(%s AS JSON),
-                    %s, %s, CAST(%s AS JSON), %s
+                    %s, %s, CAST(%s AS JSON), %s, %s, %s
                 )
                 ON DUPLICATE KEY UPDATE
                     model_name = VALUES(model_name),
@@ -297,6 +301,8 @@ def save_extraction(
                     publish_region = VALUES(publish_region),
                     international_orgs_json = VALUES(international_orgs_json),
                     publish_authority = VALUES(publish_authority),
+                    meeting_catalog_key = VALUES(meeting_catalog_key),
+                    meeting_phase = VALUES(meeting_phase),
                     id = LAST_INSERT_ID(id)
                 """,
                 (
@@ -313,6 +319,8 @@ def save_extraction(
                     pub_region,
                     _ensure_json_array(intl_clean),
                     pub_authority,
+                    meeting_catalog_key,
+                    meeting_phase,
                 ),
             )
             return int(cur.lastrowid)

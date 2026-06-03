@@ -24,9 +24,9 @@ from core.publish_actor import (
 )
 from engine.prompts import (
     EXTRACTION_SYSTEM,
-    EXTRACTION_USER_TAIL,
     PUBLISH_GEO_ONLY_USER,
     RISK_DOMAIN_LLM_GUIDANCE,
+    build_extraction_user_tail,
 )
 
 _ALLOWED_CONTENT_TYPES = frozenset(
@@ -46,7 +46,7 @@ _CONTENT_TYPE_ALIASES = {
 # ---------------------------------------------------------------------------
 # 与 models.schema.RISK_DOMAIN_CHOICES 一致；定义见 engine.prompts（供 agentic_crawl 等 re-export）。
 _SYSTEM_PROMPT = EXTRACTION_SYSTEM
-_USER_INSTRUCTION = EXTRACTION_USER_TAIL
+_USER_INSTRUCTION = build_extraction_user_tail()
 
 _BODY_TRUNCATE_CHARS = 8000
 
@@ -122,6 +122,10 @@ def _parse_article_obj(raw_obj: Any) -> Optional[Dict[str, Any]]:
     tags = _as_str_list(d.get("tags"))
     intl = _as_str_list(d.get("international_orgs"))
 
+    phase_raw = str(d.get("meeting_phase") or "").strip().lower()
+    if phase_raw not in ("pre", "during", "post", "unknown"):
+        phase_raw = ""
+
     out: Dict[str, Any] = {
         "is_relevant": True,
         "content_type": _normalize_content_type(d.get("content_type")),
@@ -137,6 +141,10 @@ def _parse_article_obj(raw_obj: Any) -> Optional[Dict[str, Any]]:
         "tags": tags[:24],
         "relevance_reason": str(d.get("relevance_reason") or "")[:512],
         "reject_reason": "",
+        "meeting_catalog_key": str(d.get("meeting_catalog_key") or "")[:64],
+        "meeting_edition_hint": str(d.get("meeting_edition_hint") or "")[:128],
+        "meeting_phase": phase_raw,
+        "proposed_series_name": str(d.get("proposed_series_name") or "")[:256],
     }
     return out
 

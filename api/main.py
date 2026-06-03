@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import analysis, health, incidents, monitoring, stats, systems, tracks
+from api.routers import analysis, health, incidents, meetings, monitoring, stats, systems, tracks
 
 load_dotenv(override=True)
 
@@ -34,7 +34,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -44,4 +44,5 @@ app.include_router(systems.router, prefix="/api")
 app.include_router(monitoring.router, prefix="/api")
 app.include_router(incidents.router, prefix="/api")
 app.include_router(tracks.router, prefix="/api")
+app.include_router(meetings.router, prefix="/api")
 app.include_router(analysis.router, prefix="/api")

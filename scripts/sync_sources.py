@@ -77,9 +77,14 @@ def _run_news(args: argparse.Namespace) -> int:
         return sync_all_news_for_policy_meeting(cfg, dry_run=args.dry_run)
 
     try:
+        from datetime import datetime
+
+        run_started = datetime.now()
         bundle = _sync()
         if not args.dry_run:
-            record_news_bundle_tasks(bundle, trigger_source="cron")
+            record_news_bundle_tasks(
+                bundle, trigger_source="cron", run_started_at=run_started
+            )
     except Exception as e:
         if not args.dry_run:
             for system_key, label in (

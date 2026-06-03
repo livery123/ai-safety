@@ -102,6 +102,8 @@ EXTRACTION_USER_TAIL = (
     "- tags: 3–8 个检索关键词\n"
     "- relevance_reason: 可选，调试说明\n\n"
     "【会议】会议级一条：名称/主办方/主题/与 AI 治理关系；勿拆发言人。\n"
+    "  另填 meeting_catalog_key（见下方名录）、meeting_edition_hint（届次/年份）、"
+    "meeting_phase（pre|during|post|unknown）；无匹配时填 proposed_series_name。\n"
     "【文献】预印本/期刊论文用 literature；政策白皮书用 report。\n\n"
     "【不相关时】仅输出：{\"is_relevant\": false, \"reject_reason\": \"no_ai_governance_content\"}\n"
     "不要捏造事实；不要 {\"incidents\":[...]}。"
@@ -181,3 +183,54 @@ SYSTEM_LABELS = {
     "literature": "AI 安全与治理文献监测",
     "platform": "AI 治理监测平台（综合）",
 }
+
+
+def build_extraction_user_tail() -> str:
+    """
+    功能：拼接抽取 user 尾注与会议名录（避免 import 循环，运行时加载 catalog）。
+    输出：完整 EXTRACTION_USER_TAIL + 名录列表。
+    """
+    try:
+        from core.meeting_catalog import catalog_keys_for_prompt
+
+        catalog_block = catalog_keys_for_prompt()
+    except Exception:
+        catalog_block = "（名录暂不可用）"
+    return (
+        EXTRACTION_USER_TAIL
+        + "\n【会议名录 meeting_catalog_key 候选】\n"
+        + catalog_block
+        + "\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 会议专题分析（meeting_brief）
+# ---------------------------------------------------------------------------
+
+MEETING_BRIEF_SYSTEM = (
+    PLATFORM_MISSION
+    + "你是 AI 治理监测平台的**国际会议专题分析师**。根据给定的一届会议及其关联报道，"
+    "撰写 Markdown **专题分析报告**（面向决策与内参）。\n"
+    "硬性要求：\n"
+    "- 只输出 Markdown，不要对话、不要代码围栏。\n"
+    "- 正文须含一级标题，且**必须**包含下列二级标题（##）：\n"
+    "  · ## 基本信息\n"
+    "  · ## 参与国家与地区\n"
+    "  · ## 核心议题\n"
+    "  · ## 联合声明与成果文件\n"
+    "  · ## 会议后续影响\n"
+    "  · ## 历史会议延续性\n"
+    "  · ## 下一阶段趋势\n"
+    "  · ## 参考文献\n"
+    "- 重要论断须带 [条目 n] 角标；无证据处写「监测库未覆盖」。\n"
+    "- 不得编造材料中不存在的事实。\n"
+    "- 参考文献节列出正文引用过的 [条目 n] + 标题 + 来源 + URL。\n"
+)
+
+MEETING_TREND_USER_HINT = (
+    "趋势分析须分别展开三节（已作为二级标题）：\n"
+    "1. 会议后续影响：对政策、产业、国际标准、地缘协调的近期影响；\n"
+    "2. 历史会议延续性：与同系列往届会议的议题承接、机制演进；\n"
+    "3. 下一阶段趋势：可观察的信号与可能走向（标注不确定性）。\n"
+)

@@ -136,12 +136,15 @@ def record_news_bundle_tasks(
     bundle: Any,
     *,
     trigger_source: str = "cron",
+    run_started_at: Optional[Any] = None,
 ) -> None:
     """
     功能：全信源新闻包跑完后，为政策/会议两子系统各写一条任务记录。
-    输入：NewsSyncBundleResult；trigger_source cron|manual。
+    输入：NewsSyncBundleResult；trigger_source cron|manual；run_started_at 用于统计 meeting 条数。
     输出：无；写 MySQL system_tasks。
     """
+    from datetime import datetime
+
     merged = getattr(bundle, "merged", bundle)
     saved = int(getattr(merged, "saved", 0) or 0)
     failed = int(getattr(merged, "failed", 0) or 0)
@@ -151,17 +154,29 @@ def record_news_bundle_tasks(
         k: int(getattr(v, "saved", 0) or 0)
         for k, v in (getattr(bundle, "by_source", {}) or {}).items()
     }
+    meeting_count = 0
+    since = run_started_at if isinstance(run_started_at, datetime) else datetime.now()
+    try:
+        from core.mysql_meeting_events import count_meeting_extractions_since
+
+        meeting_count = count_meeting_extractions_since(since)
+    except Exception:
+        meeting_count = 0
+
     for system_key, label in (
         ("policy", "完成政策/新闻采集"),
         ("meeting", "完成会议/新闻采集"),
     ):
         tid = begin_task(system_key, f"crawl_{system_key}", trigger_source=trigger_source)
+        data_count = saved if system_key == "policy" else meeting_count
         finish_task(
             tid,
             status=status,
-            data_count=saved if system_key == "policy" else 0,
+            data_count=data_count,
             message=_build_message(
-                summary=f"{label}（包内新增 {saved} 条）",
+                summary=f"{label}（包内新增 {saved} 条，会议抽取 {meeting_count} 条）"
+                if system_key == "meeting"
+                else f"{label}（包内新增 {saved} 条）",
                 log_tail=log_tail,
                 extra={"by_source": by_source},
             ),

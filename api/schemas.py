@@ -251,3 +251,77 @@ class ReportContinuityResponse(BaseModel):
     last_report_id: Optional[int] = None
     last_week_start: Optional[str] = None
     last_generated_at: Optional[str] = None
+
+
+class MeetingCatalogItem(BaseModel):
+    """重大会议名录项。"""
+
+    catalog_key: str
+    series_name: str
+    category: str = ""
+    is_major: bool = True
+    aliases: List[str] = Field(default_factory=list)
+    topics: List[str] = Field(default_factory=list)
+    official_urls: List[str] = Field(default_factory=list)
+    events: List["MeetingEventSummary"] = Field(default_factory=list)
+
+
+class MeetingEventSummary(BaseModel):
+    """会议事件列表项。"""
+
+    id: int
+    catalog_key: str
+    series_name: str = ""
+    edition_label: str = ""
+    edition_year: Optional[int] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    location: str = ""
+    host: str = ""
+    status: str = ""
+    article_count: int = 0
+    has_analysis: bool = False
+
+
+class MeetingTimelineArticle(BaseModel):
+    """事件流中单篇报道。"""
+
+    article_id: int
+    title: str
+    summary: str = ""
+    source: str = ""
+    url: str = ""
+    published_at: Optional[str] = None
+    phase: str = "unknown"
+
+
+class MeetingTimelineResponse(BaseModel):
+    """会前/会中/会后时间线。"""
+
+    event_id: int
+    pre: List[MeetingTimelineArticle] = Field(default_factory=list)
+    during: List[MeetingTimelineArticle] = Field(default_factory=list)
+    post: List[MeetingTimelineArticle] = Field(default_factory=list)
+    unknown: List[MeetingTimelineArticle] = Field(default_factory=list)
+
+
+class MeetingEventDetailResponse(BaseModel):
+    """会议事件详情 + 专题分析。"""
+
+    event: MeetingEventSummary
+    countries: List[str] = Field(default_factory=list)
+    official_url: str = ""
+    notes: str = ""
+    analysis_markdown: str = ""
+    analysis_generated_at: Optional[str] = None
+
+
+class MeetingBriefRegenerateResponse(BaseModel):
+    """重生成专题分析结果。"""
+
+    event_id: int
+    analysis_id: int
+    message: str = "ok"
+
+
+MeetingCatalogItem.model_rebuild()

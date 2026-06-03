@@ -47,7 +47,7 @@ async def run_agentic_crawl(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     debug: bool = False,
-) -> Tuple[List[Any], List[str], List[str]]:
+) -> Tuple[Optional[Dict[str, Any]], List[Any], List[str], List[str]]:
     _ = debug
     debug_log: List[str] = []
 
@@ -61,7 +61,7 @@ async def run_agentic_crawl(
 
     if not _api_key:
         debug_log.append("❌ API Key 未配置，请在 .env 文件中设置 DASHSCOPE_API_KEY")
-        return [], [], debug_log
+        return None, [], [], debug_log
 
     try:
         debug_log.append(f"✓ API 配置已验证（模型: {_model}）")
@@ -96,11 +96,11 @@ async def run_agentic_crawl(
                 debug_log.append(
                     f"❌ 爬虫失败: {result.error_message if hasattr(result, 'error_message') else '未知错误'}"
                 )
-                return [], [], debug_log
+                return None, [], [], debug_log
 
             if not result.extracted_content:
                 debug_log.append("❌ 爬虫获取内容为空，页面可能被屏蔽或不存在")
-                return [], [], debug_log
+                return None, [], [], debug_log
 
             debug_log.append(f"✓ 获取到内容（长度: {len(str(result.extracted_content))} 字符）")
 
@@ -111,18 +111,18 @@ async def run_agentic_crawl(
             except Exception as e:
                 debug_log.append(f"❌ JSON 解析失败: {str(e)}")
                 debug_log.append(f"   原始内容: {str(raw)[:200]}")
-                return [], [], debug_log
+                return None, [], [], debug_log
 
             art = _parse_article_obj(data)
             if art is None:
                 debug_log.append("❌ 无法解析为文章级抽取")
-                return [], [], debug_log
+                return None, [], [], debug_log
 
             debug_log.append(f"✓ is_relevant={art.get('is_relevant')}")
             if not art.get("is_relevant"):
                 reason = art.get("reject_reason", "")
                 debug_log.append(f"💡 未入库: {reason or 'not relevant'}")
-                return [], [], debug_log
+                return None, [], [], debug_log
 
             incident_like = article_dict_to_incident_like(art)
             rb = _rag_backend(api_key, base_url)
@@ -136,11 +136,11 @@ async def run_agentic_crawl(
             newly_added = update_watched_keywords(all_tags)
             debug_log.append(f"📊 新增关键词: {len(newly_added)}")
 
-            return incidents_data, newly_added, debug_log
+            return art, incidents_data, newly_added, debug_log
 
     except Exception as e:
         debug_log.append(f"❌ 执行异常: {type(e).__name__}: {str(e)}")
         import traceback
 
         debug_log.append(f"   堆栈: {traceback.format_exc()[:300]}")
-        return [], [], debug_log
+        return None, [], [], debug_log

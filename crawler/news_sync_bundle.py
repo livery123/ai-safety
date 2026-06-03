@@ -35,6 +35,8 @@ class NewsSyncConfig:
     sina_max_articles: int = 10
     policy_max_articles_per_country: int = 10
     policy_countries: Optional[List[str]] = None
+    nyt_begin_date: Optional[str] = None
+    nyt_end_date: Optional[str] = None
     rag_enabled: bool = False
     llm_concurrency: int = 2
 
@@ -118,7 +120,13 @@ def sync_all_news_for_policy_meeting(
         ),
         (
             "nyt",
-            lambda: sync_nyt(max_pages=c.nyt_max_pages, rag_enabled=rag, concurrency=conc),
+            lambda: sync_nyt(
+                max_pages=c.nyt_max_pages,
+                begin_date=c.nyt_begin_date,
+                end_date=c.nyt_end_date,
+                rag_enabled=rag,
+                concurrency=conc,
+            ),
         ),
         (
             "wechat_rss",

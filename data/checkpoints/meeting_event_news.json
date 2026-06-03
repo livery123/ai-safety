@@ -1,0 +1,25 @@
+{
+  "completed": [
+    "event_news:nyt:1",
+    "event_news:nyt:10",
+    "event_news:nyt:11",
+    "event_news:nyt:12",
+    "event_news:nyt:14",
+    "event_news:nyt:15",
+    "event_news:nyt:2",
+    "event_news:nyt:3",
+    "event_news:nyt:4",
+    "event_news:nyt:5",
+    "event_news:nyt:6",
+    "event_news:nyt:7",
+    "event_news:nyt:8",
+    "event_news:nyt:9"
+  ],
+  "stats": {
+    "saved": 11,
+    "skipped_url_dup": 0,
+    "skipped_no_incident": 249,
+    "failed": 0
+  },
+  "updated_at": "2026-06-04T00:08:22"
+}

@@ -1,13 +1,18 @@
 /**
  * 功能：门户前端 API 客户端；请求 FastAPI /api/*。
- * 输入：环境变量 NEXT_PUBLIC_API_URL。
+ * 输入：SSR 用 API_INTERNAL_URL，浏览器走同源 /api 反代（见 api-base.ts）。
  * 输出：JSON 解析后的 typed 数据。
  */
 
+import { apiUrl } from "@/lib/api-base";
 import type {
   IncidentItem,
   KeywordItem,
   LiteratureItem,
+  MeetingCatalogItem,
+  MeetingEventDetailResponse,
+  MeetingEventSummary,
+  MeetingTimelineResponse,
   MonitoringOverview,
   PaginatedResponse,
   PolicyAnalyticsResponse,
@@ -18,11 +23,8 @@ import type {
   WeeklyReportDetail,
 } from "./types";
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://127.0.0.1:8000";
-
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(apiUrl(path), {
     ...init,
     next: { revalidate: 60 },
   });
@@ -120,6 +122,37 @@ export function getMeetingTracks(params: {
   if (params.keyword) q.set("keyword", params.keyword);
   q.set("page_size", "12");
   return fetchJson(`/api/tracks/meetings?${q.toString()}`);
+}
+
+export function getMeetingCatalog(): Promise<MeetingCatalogItem[]> {
+  return fetchJson("/api/meetings/catalog");
+}
+
+export function getMeetingEvents(params?: {
+  page?: number;
+  page_size?: number;
+  catalog_key?: string;
+  major_only?: boolean;
+}): Promise<PaginatedResponse<MeetingEventSummary>> {
+  const q = new URLSearchParams();
+  if (params?.page) q.set("page", String(params.page));
+  if (params?.page_size) q.set("page_size", String(params.page_size));
+  if (params?.catalog_key) q.set("catalog_key", params.catalog_key);
+  if (params?.major_only === false) q.set("major_only", "false");
+  const qs = q.toString();
+  return fetchJson(`/api/meetings/events${qs ? `?${qs}` : ""}`);
+}
+
+export function getMeetingEventDetail(
+  eventId: number
+): Promise<MeetingEventDetailResponse> {
+  return fetchJson(`/api/meetings/events/${eventId}`);
+}
+
+export function getMeetingTimeline(
+  eventId: number
+): Promise<MeetingTimelineResponse> {
+  return fetchJson(`/api/meetings/events/${eventId}/timeline`);
 }
 
 export function getLiteratureTracks(params: {

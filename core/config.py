@@ -15,6 +15,9 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
+# Chroma 与 posthog 版本不匹配时会刷屏 telemetry 错误
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
 # --- LLM（OpenAI 兼容 Chat）---
 API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
 BASE_URL: str = os.getenv("LLM_BASE_URL", "https://api.siliconflow.cn/v1").rstrip("/")
@@ -118,3 +121,34 @@ POLICY_IN_MAX_PAGES: int = _env_int("POLICY_IN_MAX_PAGES", 3)
 BACKFILL_POLICY_TARGET: int = _env_int("BACKFILL_POLICY_TARGET", 1000)
 BACKFILL_POLICY_WINDOW_DAYS: int = _env_int("BACKFILL_POLICY_WINDOW_DAYS", 30)
 BACKFILL_POLICY_MAX_PER_WINDOW: int = _env_int("BACKFILL_POLICY_MAX_PER_WINDOW", 100)
+
+# --- 会议历史回溯（backfill_meeting_historical.py）---
+BACKFILL_MEETING_DATE_FROM: str = os.getenv("BACKFILL_MEETING_DATE_FROM", "2023-01-01").strip()
+BACKFILL_MEETING_WINDOW_DAYS: int = _env_int("BACKFILL_MEETING_WINDOW_DAYS", 30)
+BACKFILL_MEETING_NYT_MAX_PAGES: int = _env_int("BACKFILL_MEETING_NYT_MAX_PAGES", 3)
+BACKFILL_MEETING_GUARDIAN_MAX_PAGES: int = _env_int("BACKFILL_MEETING_GUARDIAN_MAX_PAGES", 4)
+MEETING_BRIEF_MIN_ARTICLES: int = _env_int("MEETING_BRIEF_MIN_ARTICLES", 2)
+MEETING_BRIEF_DAYS_AFTER_END: int = _env_int("MEETING_BRIEF_DAYS_AFTER_END", 7)
+
+# --- 按届定向新闻检索（sync_meeting_event_news.py）---
+MEETING_NEWS_PRE_DAYS: int = _env_int("MEETING_NEWS_PRE_DAYS", 30)
+MEETING_NEWS_POST_DAYS: int = _env_int("MEETING_NEWS_POST_DAYS", 60)
+MEETING_NEWS_NYT_MAX_PAGES: int = _env_int("MEETING_NEWS_NYT_MAX_PAGES", 3)
+MEETING_NEWS_GUARDIAN_MAX_PAGES: int = _env_int("MEETING_NEWS_GUARDIAN_MAX_PAGES", 2)
+MEETING_NEWS_RECENT_PAST_DAYS: int = _env_int("MEETING_NEWS_RECENT_PAST_DAYS", 30)
+MEETING_NEWS_RECENT_FUTURE_DAYS: int = _env_int("MEETING_NEWS_RECENT_FUTURE_DAYS", 90)
+
+# NYT/Guardian 会议增强检索词（轮换）
+MEETING_BACKFILL_QUERIES: tuple[str, ...] = tuple(
+    q.strip()
+    for q in (
+        os.getenv(
+            "MEETING_BACKFILL_QUERIES",
+            "AI Safety Summit;REAIM summit;WAIC artificial intelligence;"
+            "AI governance summit;Bletchley AI safety;Seoul AI summit;"
+            "Paris AI Action Summit;India AI safety;UN AI governance dialogue;"
+            "responsible AI military;global AI standards summit",
+        ).split(";")
+    )
+    if q.strip()
+)

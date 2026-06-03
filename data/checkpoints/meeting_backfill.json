@@ -1,0 +1,22 @@
+{
+  "completed": [
+    "meeting:nyt:AI_Safety_Summit:2023-01-01:2023-01-30",
+    "meeting:nyt:AI_governance_summit:2023-01-01:2023-01-30",
+    "meeting:nyt:Bletchley_AI_safety:2023-01-01:2023-01-30",
+    "meeting:nyt:India_AI_safety:2023-01-01:2023-01-30",
+    "meeting:nyt:Paris_AI_Action_Summit:2023-01-01:2023-01-30",
+    "meeting:nyt:REAIM_summit:2023-01-01:2023-01-30",
+    "meeting:nyt:Seoul_AI_summit:2023-01-01:2023-01-30",
+    "meeting:nyt:UN_AI_governance_dialogue:2023-01-01:2023-01-30",
+    "meeting:nyt:WAIC_artificial_intelligence:2023-01-01:2023-01-30",
+    "meeting:nyt:global_AI_standards_summit:2023-01-01:2023-01-30",
+    "meeting:nyt:responsible_AI_military:2023-01-01:2023-01-30"
+  ],
+  "stats": {
+    "saved": 5,
+    "skipped_url_dup": 3,
+    "skipped_no_incident": 126,
+    "failed": 0
+  },
+  "updated_at": "2026-06-03T22:01:45"
+}

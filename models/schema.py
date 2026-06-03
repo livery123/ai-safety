@@ -138,6 +138,26 @@ class ArticleExtractionPayload(BaseModel):
         max_length=512,
         description="为何判定相关；仅供调试，不落 article_extractions",
     )
+    meeting_catalog_key: str = Field(
+        default="",
+        max_length=64,
+        description="重大会议名录 catalog_key；仅 content_type=meeting 时填写",
+    )
+    meeting_edition_hint: str = Field(
+        default="",
+        max_length=128,
+        description="届次/年份线索，如 2023、首尔峰会",
+    )
+    meeting_phase: str = Field(
+        default="",
+        max_length=16,
+        description="会前/会中/会后：pre|during|post|unknown",
+    )
+    proposed_series_name: str = Field(
+        default="",
+        max_length=256,
+        description="不在名录时建议的会议系列名；供后续入 catalog",
+    )
 
 
 # Crawl4AI 旧名兼容

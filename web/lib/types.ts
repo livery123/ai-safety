@@ -72,6 +72,59 @@ export interface LiteratureItem {
   url: string;
 }
 
+export interface MeetingEventSummary {
+  id: number;
+  catalog_key: string;
+  series_name?: string;
+  edition_label: string;
+  edition_year?: number | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  location: string;
+  host: string;
+  status: string;
+  article_count: number;
+  has_analysis: boolean;
+}
+
+export interface MeetingCatalogItem {
+  catalog_key: string;
+  series_name: string;
+  category: string;
+  is_major: boolean;
+  aliases: string[];
+  topics: string[];
+  official_urls: string[];
+  events: MeetingEventSummary[];
+}
+
+export interface MeetingTimelineArticle {
+  article_id: number;
+  title: string;
+  summary: string;
+  source: string;
+  url: string;
+  published_at?: string | null;
+  phase: string;
+}
+
+export interface MeetingTimelineResponse {
+  event_id: number;
+  pre: MeetingTimelineArticle[];
+  during: MeetingTimelineArticle[];
+  post: MeetingTimelineArticle[];
+  unknown: MeetingTimelineArticle[];
+}
+
+export interface MeetingEventDetailResponse {
+  event: MeetingEventSummary;
+  countries: string[];
+  official_url: string;
+  notes: string;
+  analysis_markdown: string;
+  analysis_generated_at?: string | null;
+}
+
 export interface WeeklySummary {
   range_start: string;
   range_end: string;

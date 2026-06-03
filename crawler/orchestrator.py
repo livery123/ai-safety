@@ -156,6 +156,21 @@ def _persist_mysql_phase1(
             result.debug_log.append(
                 f"💾 MySQL 重索引后更新 extraction article_id={article_id}, extraction_id={extraction_id}"
             )
+        if str(merged_extraction.get("content_type") or "") == "meeting":
+            try:
+                from services.meeting_event_linker import link_article_to_meeting_event
+
+                ev_id = link_article_to_meeting_event(
+                    article_id,
+                    title=art.title or "",
+                    summary=summary,
+                    published_at=published_at,
+                    extraction=merged_extraction,
+                )
+                if ev_id:
+                    result.debug_log.append(f"🔗 已关联会议事件 event_id={ev_id}")
+            except Exception as link_err:
+                result.debug_log.append(f"⚠️ 会议事件关联失败: {type(link_err).__name__}: {link_err}")
     except Exception as e:
         result.debug_log.append(f"⚠️ MySQL extraction 写入失败: {type(e).__name__}: {e}")
 
@@ -1532,3 +1547,61 @@ def sync_literature(
             f"已有跳过 {result.skipped_url_dup}，失败 {result.failed}"
         )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Agentic 单 URL（会议官网等）
+# ---------------------------------------------------------------------------
+
+
+async def async_sync_agentic_url(
+    url: str,
+    *,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    rag_enabled: Optional[bool] = None,
+) -> SyncResult:
+    """
+    功能：抓取单页并写入 MySQL（供会议官网回溯）。
+    输入：目标 URL。
+    输出：SyncResult。
+    """
+    from crawler.agentic_crawl import run_agentic_crawl
+    from crawler.sources.guardian import RawArticle
+
+    result = SyncResult()
+    log = result.debug_log
+    llm_backend = _build_llm_backend(api_key, base_url)
+    art_dict, _incidents, _kws, dbg = await run_agentic_crawl(
+        url, api_key=api_key, base_url=base_url
+    )
+    log.extend(dbg)
+    if not art_dict or not art_dict.get("is_relevant"):
+        result.skipped_no_incident += 1
+        return result
+    title = str(art_dict.get("main_topic") or url)[:1024]
+    summary = str(art_dict.get("summary_structured") or "")[:2000]
+    raw = RawArticle(
+        web_url=url,
+        title=title,
+        trail_text=summary or None,
+        body_text=summary or None,
+        web_publication_date=datetime.now().strftime("%Y-%m-%d"),
+        section_name="agentic",
+        api_url=None,
+        guardian_id=None,
+    )
+    _persist_mysql_phase1(
+        raw,
+        art_dict,
+        result,
+        llm_backend=llm_backend,
+        source="agentic",
+        force_reindex=False,
+    )
+    return result
+
+
+def sync_agentic_url(url: str, **kwargs: Any) -> SyncResult:
+    """sync 包装 async_sync_agentic_url。"""
+    return asyncio.run(async_sync_agentic_url(url, **kwargs))
