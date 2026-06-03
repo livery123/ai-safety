@@ -10,6 +10,7 @@ import type {
   LiteratureItem,
   MonitoringOverview,
   PaginatedResponse,
+  PolicyAnalyticsResponse,
   StatsResponse,
   SystemInfo,
   WeeklySummary,
@@ -37,6 +38,21 @@ export function getStats(): Promise<StatsResponse> {
 
 export function getKeywords(limit = 20): Promise<KeywordItem[]> {
   return fetchJson(`/api/stats/keywords?limit=${limit}`);
+}
+
+export function getPolicyAnalytics(params?: {
+  country_limit?: number;
+  word_limit?: number;
+  word_field?: string;
+  week_limit?: number;
+}): Promise<PolicyAnalyticsResponse> {
+  const q = new URLSearchParams();
+  if (params?.country_limit) q.set("country_limit", String(params.country_limit));
+  if (params?.word_limit) q.set("word_limit", String(params.word_limit));
+  if (params?.word_field) q.set("word_field", params.word_field);
+  if (params?.week_limit) q.set("week_limit", String(params.week_limit));
+  const qs = q.toString();
+  return fetchJson(`/api/stats/policy/analytics${qs ? `?${qs}` : ""}`);
 }
 
 export function getSystems(): Promise<SystemInfo[]> {

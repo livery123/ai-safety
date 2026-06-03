@@ -12,7 +12,7 @@ from typing import List
 
 from fastapi import APIRouter, Query
 
-from api.schemas import KeywordItem, StatsResponse, SystemInfo, WeeklySummaryResponse
+from api.schemas import KeywordItem, PolicyAnalyticsResponse, StatsResponse, SystemInfo, WeeklySummaryResponse
 from api.services import portal_data
 
 router = APIRouter(prefix="/stats", tags=["stats"])
@@ -28,6 +28,22 @@ def get_stats() -> StatsResponse:
 def get_keywords(limit: int = Query(20, ge=1, le=60)) -> List[KeywordItem]:
     """高频关键词。"""
     return portal_data.get_keywords(limit)
+
+
+@router.get("/policy/analytics", response_model=PolicyAnalyticsResponse)
+def get_policy_analytics(
+    country_limit: int = Query(12, ge=3, le=30),
+    word_limit: int = Query(40, ge=10, le=120),
+    word_field: str = Query("mixed", description="authority|tags|intl|mixed"),
+    week_limit: int = Query(16, ge=4, le=52),
+) -> PolicyAnalyticsResponse:
+    """政策可视化：覆盖度、国家分布、周趋势、词云。"""
+    return portal_data.get_policy_analytics(
+        country_limit=country_limit,
+        word_limit=word_limit,
+        word_field=word_field,
+        week_limit=week_limit,
+    )
 
 
 @router.get("/systems", response_model=List[SystemInfo])

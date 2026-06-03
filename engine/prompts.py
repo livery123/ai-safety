@@ -59,8 +59,36 @@ EXTRACTION_SYSTEM = (
     "不要拆成多条 incident，不要输出 incidents 数组，不要对话。"
 )
 
+PUBLISH_GEO_GUIDANCE = (
+    "【发布地理与主体——须与 entities 严格区分】\n"
+    "以下四字段描述**谁发布/制定了该政策或文件**，不是新闻正文里随便提到的公司、法院当事人或媒体：\n"
+    "- publish_country: 主权国家中文规范名（如：中国、美国、英国、印度、巴西）。"
+    "欧盟法规不填主权国，见 publish_region。\n"
+    "- publish_region: 次级区域（如：欧盟、台湾、香港、澳门、加州）。"
+    "欧盟机构发布填「欧盟」。\n"
+    "- international_orgs: 字符串数组，国际组织（如：联合国、世界贸易组织、OECD、ISO）。"
+    "仅当文件由或代表该组织发布时填写。\n"
+    "- publish_authority: 法定发文机关正式名称（如：美国商务部、中国网信办、欧盟委员会、Federal Register）。"
+    "须是**发布/制定**该文件的机关，不是被引述的企业或媒体。\n"
+    "- entities: 字符串数组，文中**其他**涉及的机构/人物（**不得**重复 publish_authority）。\n\n"
+    "【国家/地区划分——必须遵守】\n"
+    "- 台湾、台澎金马任何官方发布：publish_country=「中国」，publish_region=「台湾」。"
+    "**不得**将台湾列为独立国家或使用「中华民国」作为国家名。\n"
+    "- 香港、澳门：publish_country=「中国」，publish_region=「香港」或「澳门」。\n"
+    "- 欧盟：publish_region=「欧盟」，publish_country 留空字符串。\n"
+    "- 联合国系统文件：international_orgs 含「联合国」，publish_authority 填具体机构（如 UNESCO）。\n"
+    "若正文前有【采集线索】块，可作参考但须与正文交叉核实。\n"
+)
+
+PUBLISH_GEO_ONLY_USER = (
+    PUBLISH_GEO_GUIDANCE
+    + "只输出 JSON，字段：publish_country、publish_region、international_orgs（数组）、"
+    "publish_authority。不要输出其他字段。无法判断的字符串字段用空字符串，数组用 []。\n"
+)
+
 EXTRACTION_USER_TAIL = (
     RELEVANCE_FILTER
+    + PUBLISH_GEO_GUIDANCE
     + "【相关时】输出 JSON，字段与 article_extractions 表对应：\n"
     "- is_relevant: true\n"
     "- content_type: literature | meeting | report | policy | opinion | news | other\n"
@@ -68,7 +96,8 @@ EXTRACTION_USER_TAIL = (
     "- "
     + RISK_DOMAIN_LLM_GUIDANCE
     + "- risk_subdomains: 字符串数组，治理或风险议题短标签\n"
-    "- entities: 字符串数组，主要机构/政府/公司/人物\n"
+    "- publish_country, publish_region, international_orgs, publish_authority（见上）\n"
+    "- entities: 字符串数组，文中其他机构/人物（**不含** publish_authority）\n"
     "- summary_structured: 监测用一句话摘要，≤512 字，突出治理含义而非产品参数\n"
     "- tags: 3–8 个检索关键词\n"
     "- relevance_reason: 可选，调试说明\n\n"
@@ -82,8 +111,10 @@ AGENTIC_CRAWL_INSTRUCTION = (
     PLATFORM_MISSION
     + "你是 AI 治理与安全**监测入库分析师**。对页面输出**一个** JSON，字段须符合 schema。\n"
     + RELEVANCE_FILTER
-    + "相关时填：is_relevant=true、content_type、main_topic、risk_subdomains、entities、"
-    "summary_structured（突出治理监管含义）、tags；\n"
+    + PUBLISH_GEO_GUIDANCE
+    + "相关时填：is_relevant=true、content_type、main_topic、risk_subdomains、"
+    "publish_country、publish_region、international_orgs、publish_authority、"
+    "entities（不含发布主体）、summary_structured（突出治理监管含义）、tags；\n"
     + RISK_DOMAIN_LLM_GUIDANCE
     + "可选 relevance_reason；会议稿用会议级信息；"
     "不相关时仅 {\"is_relevant\":false,\"reject_reason\":\"no_ai_governance_content\"}。"

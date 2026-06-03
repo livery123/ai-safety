@@ -1,5 +1,6 @@
 import PageBanner from "@/components/PageBanner";
 import AnalysisBriefCard from "@/components/AnalysisBriefCard";
+import PolicyAnalyticsDashboard from "@/components/policy/PolicyAnalyticsDashboard";
 import TrackList from "@/components/TrackList";
 import { getWeeklyReports, getWeeklySummary } from "@/lib/api";
 import {
@@ -33,6 +34,7 @@ export default async function PolicyPage() {
         summary={summary}
       />
       <AnalysisBriefCard brief={latestBrief} systemKey="policy" />
+      <PolicyAnalyticsDashboard />
       <TrackList track="policy" />
     </div>
   );

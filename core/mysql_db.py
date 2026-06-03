@@ -163,6 +163,13 @@ def save_extraction(
     if not isinstance(ents, list):
         ents = []
     ents_clean = [str(x).strip() for x in ents if str(x).strip()]
+    intl_orgs = d.get("international_orgs") or []
+    if not isinstance(intl_orgs, list):
+        intl_orgs = []
+    intl_clean = [str(x).strip() for x in intl_orgs if str(x).strip()]
+    pub_country = str(d.get("publish_country") or "").strip()[:64] or None
+    pub_region = str(d.get("publish_region") or "").strip()[:128] or None
+    pub_authority = str(d.get("publish_authority") or "").strip()[:256] or None
 
     with mysql_conn() as conn:
         with conn.cursor() as cur:
@@ -171,10 +178,13 @@ def save_extraction(
                 INSERT INTO article_extractions (
                     article_id, model_name, content_type, main_topic,
                     risk_domain, risk_subdomains_json, entities_json,
-                    summary_structured, tags_raw
+                    summary_structured, tags_raw,
+                    publish_country, publish_region, international_orgs_json,
+                    publish_authority
                 ) VALUES (
                     %s, %s, %s, %s, %s, CAST(%s AS JSON), CAST(%s AS JSON),
-                    %s, CAST(%s AS JSON)
+                    %s, CAST(%s AS JSON),
+                    %s, %s, CAST(%s AS JSON), %s
                 )
                 ON DUPLICATE KEY UPDATE
                     model_name = VALUES(model_name),
@@ -185,6 +195,10 @@ def save_extraction(
                     entities_json = VALUES(entities_json),
                     summary_structured = VALUES(summary_structured),
                     tags_raw = VALUES(tags_raw),
+                    publish_country = VALUES(publish_country),
+                    publish_region = VALUES(publish_region),
+                    international_orgs_json = VALUES(international_orgs_json),
+                    publish_authority = VALUES(publish_authority),
                     id = LAST_INSERT_ID(id)
                 """,
                 (
@@ -197,9 +211,53 @@ def save_extraction(
                     _ensure_json_array(ents_clean),
                     str(d.get("summary_structured", d.get("summary", ""))).strip()[:512],
                     _ensure_json_array(tags),
+                    pub_country,
+                    pub_region,
+                    _ensure_json_array(intl_clean),
+                    pub_authority,
                 ),
             )
             return int(cur.lastrowid)
+
+
+def update_extraction_publish_fields(
+    article_id: int,
+    *,
+    publish_country: Optional[str] = None,
+    publish_region: Optional[str] = None,
+    international_orgs: Optional[List[str]] = None,
+    publish_authority: Optional[str] = None,
+) -> None:
+    """
+    功能：仅更新 article_extractions 发布地理四字段（回填脚本用）。
+    输入：article_id 与四字段；None 表示不更新该列。
+    输出：无；写 MySQL。
+    """
+    if article_id <= 0:
+        raise ValueError("article_id must be positive")
+    sets: List[str] = []
+    params: List[Any] = []
+    if publish_country is not None:
+        sets.append("publish_country = %s")
+        params.append((publish_country or "").strip()[:64] or None)
+    if publish_region is not None:
+        sets.append("publish_region = %s")
+        params.append((publish_region or "").strip()[:128] or None)
+    if international_orgs is not None:
+        sets.append("international_orgs_json = CAST(%s AS JSON)")
+        params.append(_ensure_json_array(international_orgs))
+    if publish_authority is not None:
+        sets.append("publish_authority = %s")
+        params.append((publish_authority or "").strip()[:256] or None)
+    if not sets:
+        return
+    params.append(article_id)
+    with mysql_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE article_extractions SET {', '.join(sets)} WHERE article_id = %s",
+                tuple(params),
+            )
 
 
 def save_article_chunk(

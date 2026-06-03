@@ -268,13 +268,21 @@ def search_articles_multipage(
     return all_rows
 
 
-def raw_article_to_llm_context(article: RawArticle) -> str:
+def raw_article_to_llm_context(
+    article: RawArticle,
+    crawl_hints: Optional[Any] = None,
+) -> str:
     """
-    功能：将 RawArticle 拼成一段供 LLM 抽取的上下文（标题 + 导语 + 正文优先）。
-    输入：RawArticle。
+    功能：将 RawArticle 拼成一段供 LLM 抽取的上下文（标题 + 导语 + 正文 + 可选采集线索）。
+    输入：RawArticle；crawl_hints 为 CrawlHints 或 None。
     输出：单字符串；无 IO。
     """
-    parts: List[str] = [f"Title: {article.title}"]
+    parts: List[str] = []
+    if crawl_hints is not None and hasattr(crawl_hints, "to_prompt_block"):
+        hint_block = crawl_hints.to_prompt_block().strip()
+        if hint_block:
+            parts.append(hint_block)
+    parts.append(f"Title: {article.title}")
     if article.trail_text:
         parts.append(f"Lead: {article.trail_text}")
     if article.body_text:

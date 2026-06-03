@@ -9,11 +9,25 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
 
 from core.config import API_KEY, BASE_URL
 from core.llm_client import OpenAICompatibleBackend
-from engine.prompts import EXTRACTION_SYSTEM, EXTRACTION_USER_TAIL, RISK_DOMAIN_LLM_GUIDANCE
+from core.publish_actor import (
+    CrawlHints,
+    hints_from_raw_article,
+    normalize_publish_fields,
+    validate_publish_fields,
+)
+from engine.prompts import (
+    EXTRACTION_SYSTEM,
+    EXTRACTION_USER_TAIL,
+    PUBLISH_GEO_ONLY_USER,
+    RISK_DOMAIN_LLM_GUIDANCE,
+)
 
 _ALLOWED_CONTENT_TYPES = frozenset(
     {"news", "meeting", "report", "policy", "opinion", "literature", "other"}
@@ -106,6 +120,7 @@ def _parse_article_obj(raw_obj: Any) -> Optional[Dict[str, Any]]:
 
     summary = str(d.get("summary_structured") or d.get("summary") or "")[:512]
     tags = _as_str_list(d.get("tags"))
+    intl = _as_str_list(d.get("international_orgs"))
 
     out: Dict[str, Any] = {
         "is_relevant": True,
@@ -114,12 +129,27 @@ def _parse_article_obj(raw_obj: Any) -> Optional[Dict[str, Any]]:
         "risk_domain": str(d.get("risk_domain") or "").strip(),
         "risk_subdomains": subs[:20],
         "entities": ents[:50],
+        "publish_country": str(d.get("publish_country") or "").strip()[:64],
+        "publish_region": str(d.get("publish_region") or "").strip()[:128],
+        "international_orgs": intl[:12],
+        "publish_authority": str(d.get("publish_authority") or "").strip()[:256],
         "summary_structured": summary,
         "tags": tags[:24],
         "relevance_reason": str(d.get("relevance_reason") or "")[:512],
         "reject_reason": "",
     }
     return out
+
+
+def _apply_publish_normalization(
+    art: Optional[Dict[str, Any]],
+    crawl_hints: Optional[CrawlHints],
+    body_text: str,
+) -> Optional[Dict[str, Any]]:
+    if not art or not art.get("is_relevant"):
+        return art
+    normalize_publish_fields(art, crawl_hints, text_blob=body_text)
+    return art
 
 
 def article_dict_to_incident_like(art: Dict[str, Any]) -> Dict[str, Any]:
@@ -182,6 +212,7 @@ def extract_article_from_text(
     backend: Optional[OpenAICompatibleBackend] = None,
     temperature: float = 0.1,
     timeout: float = 120.0,
+    crawl_hints: Optional[CrawlHints] = None,
 ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     debug: List[str] = []
     text = body_text.strip()
@@ -207,6 +238,10 @@ def extract_article_from_text(
     if art is None:
         debug.append(f"❌ 无法解析为文章级抽取 [{source_url[:60]}]")
         return None, debug
+    art = _apply_publish_normalization(art, crawl_hints, text)
+    if art and art.get("is_relevant"):
+        for w in validate_publish_fields(art):
+            debug.append(f"⚠️ 发布地理字段: {w} [{source_url[:40]}]")
     debug.append(f"✓ 抽取完成，is_relevant:{art['is_relevant']} [{source_url[:60]}]")
     return art, debug
 
@@ -220,6 +255,7 @@ async def async_extract_article_from_text(
     backend: Optional[OpenAICompatibleBackend] = None,
     temperature: float = 0.1,
     timeout: float = 120.0,
+    crawl_hints: Optional[CrawlHints] = None,
 ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     debug: List[str] = []
     text = body_text.strip()
@@ -247,6 +283,10 @@ async def async_extract_article_from_text(
     if art is None:
         debug.append(f"❌ 无法解析为文章级抽取 [{source_url[:60]}]")
         return None, debug
+    art = _apply_publish_normalization(art, crawl_hints, text)
+    if art and art.get("is_relevant"):
+        for w in validate_publish_fields(art):
+            debug.append(f"⚠️ 发布地理字段: {w} [{source_url[:40]}]")
     debug.append(f"✓ 异步抽取完成，is_relevant:{art['is_relevant']} [{source_url[:60]}]")
     return art, debug
 
@@ -276,6 +316,34 @@ def extract_incidents_from_text(
     return [article_dict_to_incident_like(art)], dbg
 
 
+async def async_extract_raw_article(
+    art: Any,
+    source_tag: str = "",
+    *,
+    backend: Optional[OpenAICompatibleBackend] = None,
+) -> Tuple[Any, Optional[Dict[str, Any]], List[str]]:
+    """
+    功能：RawArticle → LLM 上下文（含采集 hint）→ 抽取 → 发布地理归一化。
+    输入：RawArticle；source_tag 如 policy:US、guardian。
+    输出：(art, article_dict, debug_log)。
+    """
+    from crawler.sources.guardian import raw_article_to_llm_context
+
+    hints = hints_from_raw_article(
+        source=source_tag,
+        section_name=str(getattr(art, "section_name", "") or ""),
+        body_text=str(getattr(art, "body_text", "") or ""),
+    )
+    context = raw_article_to_llm_context(art, crawl_hints=hints)
+    article_dict, ext_log = await async_extract_article_from_text(
+        context,
+        source_url=str(getattr(art, "web_url", "") or ""),
+        backend=backend,
+        crawl_hints=hints,
+    )
+    return art, article_dict, ext_log
+
+
 async def async_extract_incidents_from_text(
     body_text: str,
     source_url: str = "",
@@ -285,7 +353,9 @@ async def async_extract_incidents_from_text(
     backend: Optional[OpenAICompatibleBackend] = None,
     temperature: float = 0.1,
     timeout: float = 120.0,
+    crawl_hints: Optional[CrawlHints] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """兼容旧签名：异步文章级抽取，仅当 is_relevant 时返回单元素 incident_like 列表。"""
     art, dbg = await async_extract_article_from_text(
         body_text,
         source_url,
@@ -294,8 +364,105 @@ async def async_extract_incidents_from_text(
         backend=backend,
         temperature=temperature,
         timeout=timeout,
+        crawl_hints=crawl_hints,
     )
     if not art or not art.get("is_relevant"):
         return [], dbg
     return [article_dict_to_incident_like(art)], dbg
+
+
+def _is_llm_retryable(exc: BaseException) -> bool:
+    """超时/网络类错误可重试。"""
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError)):
+        return True
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    return "timeout" in name or "timeout" in msg or "timed out" in msg
+
+
+def extract_publish_geo_fields(
+    body_text: str,
+    source_url: str = "",
+    *,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    backend: Optional[OpenAICompatibleBackend] = None,
+    temperature: float = 0.0,
+    timeout: float = 180.0,
+    max_retries: int = 3,
+    retry_delay: float = 3.0,
+    crawl_hints: Optional[CrawlHints] = None,
+) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """
+    功能：轻量 LLM 调用，仅抽取发布地理四字段（回填脚本用）。
+    输入：正文、URL、可选 crawl_hints；timeout/max_retries/retry_delay 控制超时重试。
+    输出：(含四字段的 dict | None, debug_log)。
+    """
+    debug: List[str] = []
+    text = (body_text or "").strip()
+    if not text:
+        debug.append(f"❌ 文本为空 [{source_url[:60]}]")
+        return None, debug
+    if len(text) > _BODY_TRUNCATE_CHARS:
+        text = text[:_BODY_TRUNCATE_CHARS]
+        debug.append(f"⚠️ 正文截断为 {_BODY_TRUNCATE_CHARS} 字符")
+
+    hint_block = ""
+    if crawl_hints is not None:
+        hint_block = crawl_hints.to_prompt_block().strip()
+        if hint_block:
+            hint_block = hint_block + "\n\n"
+
+    llm = backend or _build_backend(api_key, base_url)
+    messages = [
+        {"role": "system", "content": EXTRACTION_SYSTEM},
+        {
+            "role": "user",
+            "content": f"{PUBLISH_GEO_ONLY_USER}\n\n---\n{hint_block}{text}",
+        },
+    ]
+
+    retries = max(1, int(max_retries))
+    raw_obj: Any = None
+    for attempt in range(1, retries + 1):
+        attempt_timeout = timeout * (1.0 + 0.25 * (attempt - 1))
+        try:
+            raw_obj = llm.chat_completion_json(
+                messages, temperature=temperature, timeout=attempt_timeout
+            )
+            if attempt > 1:
+                debug.append(
+                    f"✓ 第 {attempt} 次重试成功 (timeout={attempt_timeout:.0f}s) [{source_url[:40]}]"
+                )
+            break
+        except Exception as e:
+            if attempt < retries and _is_llm_retryable(e):
+                debug.append(
+                    f"⚠️ LLM {type(e).__name__}，{retry_delay:.0f}s 后重试 "
+                    f"({attempt}/{retries}, timeout={attempt_timeout:.0f}s) [{source_url[:40]}]"
+                )
+                time.sleep(retry_delay)
+                continue
+            debug.append(f"❌ LLM 调用失败 [{source_url[:60]}]: {type(e).__name__}: {e}")
+            return None, debug
+
+    if raw_obj is None:
+        debug.append(f"❌ LLM 无响应 [{source_url[:60]}]")
+        return None, debug
+
+    if not isinstance(raw_obj, dict):
+        debug.append(f"❌ 非 JSON 对象 [{source_url[:60]}]")
+        return None, debug
+
+    out: Dict[str, Any] = {
+        "content_type": "policy",
+        "is_relevant": True,
+        "publish_country": str(raw_obj.get("publish_country") or "").strip()[:64],
+        "publish_region": str(raw_obj.get("publish_region") or "").strip()[:128],
+        "international_orgs": _as_str_list(raw_obj.get("international_orgs"))[:12],
+        "publish_authority": str(raw_obj.get("publish_authority") or "").strip()[:256],
+    }
+    normalize_publish_fields(out, crawl_hints, text_blob=text)
+    debug.append(f"✓ geo 抽取完成 [{source_url[:60]}]")
+    return out, debug
 

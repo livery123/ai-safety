@@ -25,6 +25,11 @@ export default function LiteratureList() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError("");
+    if (selectedSources?.length === 0) {
+      setData({ items: [], total: 0, page: 1, page_size: 12, pages: 0 });
+      setLoading(false);
+      return;
+    }
     try {
       const q = new URLSearchParams({ page: String(page), page_size: "12" });
       if (keyword.trim()) q.set("keyword", keyword.trim());
@@ -69,11 +74,19 @@ export default function LiteratureList() {
           加载失败（{error}），请确认 API 已启动。
         </p>
       )}
-      {!loading && data && data.items.length === 0 && (
-        <p className="rounded-xl border border-dashed p-8 text-center text-slate-500">
-          暂无匹配结果
+      {!loading && selectedSources?.length === 0 && (
+        <p className="rounded-xl border border-dashed border-amber-200 bg-amber-50/50 p-8 text-center text-sm text-amber-800">
+          请至少选择一个来源
         </p>
       )}
+      {!loading &&
+        selectedSources?.length !== 0 &&
+        data &&
+        data.items.length === 0 && (
+          <p className="rounded-xl border border-dashed p-8 text-center text-slate-500">
+            暂无匹配结果
+          </p>
+        )}
       <div className="grid gap-4 sm:grid-cols-2">
         {data?.items.map((item, i) => (
           <LiteratureCard key={`${item.title}-${i}`} item={item} />

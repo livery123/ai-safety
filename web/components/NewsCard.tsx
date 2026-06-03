@@ -6,6 +6,13 @@ import { formatDate } from "@/lib/api";
 import type { IncidentItem } from "@/lib/types";
 
 export default function NewsCard({ item }: { item: IncidentItem }) {
+  const geoLabel =
+    item.publish_country?.trim() ||
+    item.publish_region?.trim() ||
+    "";
+  const authority = item.publish_authority?.trim() || "";
+  const intlOrgs = item.international_orgs?.trim() || "";
+
   const titleEl = item.url ? (
     <a
       href={item.url}
@@ -35,6 +42,24 @@ export default function NewsCard({ item }: { item: IncidentItem }) {
         {item.subdomain && item.subdomain !== "未指定子域" && (
           <span className="rounded-full bg-violet-50 px-2.5 py-0.5 text-xs font-medium text-violet-700">
             {item.subdomain}
+          </span>
+        )}
+        {geoLabel && (
+          <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-800">
+            {geoLabel}
+          </span>
+        )}
+        {authority && (
+          <span
+            className="max-w-[200px] truncate rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-900"
+            title={authority}
+          >
+            {authority}
+          </span>
+        )}
+        {intlOrgs && (
+          <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-800">
+            {intlOrgs}
           </span>
         )}
       </div>

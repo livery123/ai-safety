@@ -14,6 +14,35 @@ export interface KeywordItem {
   count: number;
 }
 
+export interface PolicyCountItem {
+  label: string;
+  count: number;
+  kind: "sovereign" | "region";
+}
+
+export interface PolicyWordItem {
+  text: string;
+  value: number;
+  category: "authority" | "tag" | "intl_org";
+}
+
+export interface PolicyCoverageStats {
+  sovereign_count: number;
+  sovereign_names: string[];
+  region_count: number;
+  region_names: string[];
+  intl_org_doc_count: number;
+  missing_geo_count: number;
+  meets_kpi: boolean;
+}
+
+export interface PolicyAnalyticsResponse {
+  coverage: PolicyCoverageStats;
+  by_country: PolicyCountItem[];
+  by_week: KeywordItem[];
+  wordcloud: PolicyWordItem[];
+}
+
 export interface IncidentItem {
   id?: number | null;
   title: string;
@@ -26,6 +55,10 @@ export interface IncidentItem {
   url: string;
   tags: string[];
   published_at?: string | null;
+  publish_country?: string;
+  publish_region?: string;
+  publish_authority?: string;
+  international_orgs?: string;
 }
 
 export interface LiteratureItem {

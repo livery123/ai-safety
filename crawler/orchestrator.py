@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.config import API_KEY, BASE_URL, LLM_MODEL
 from core.llm_client import OpenAICompatibleBackend
 from crawler.extraction import (
-    async_extract_article_from_text,
+    async_extract_raw_article,
     article_dict_to_incident_like,
     merge_article_with_rag,
 )
@@ -37,7 +37,6 @@ from crawler.sources.guardian import (
     DEFAULT_AI_GOVERNANCE_QUERY,
     GuardianAPIError,
     RawArticle,
-    raw_article_to_llm_context,
     search_articles_multipage,
 )
 from crawler.sources.nyt import (
@@ -302,13 +301,7 @@ async def async_sync_guardian(
 
     async def _extract_one(art: RawArticle) -> Tuple[RawArticle, Optional[Dict[str, Any]], List[str]]:
         async with sem:
-            context = raw_article_to_llm_context(art)
-            article_dict, ext_log = await async_extract_article_from_text(
-                context,
-                source_url=art.web_url,
-                backend=llm_backend,
-            )
-        return art, article_dict, ext_log
+            return await async_extract_raw_article(art, "guardian", backend=llm_backend)
 
     log.append(f"🚀 并发抽取 {len(deduped)} 篇（并发上限 {concurrency}）...")
     extract_results = await asyncio.gather(*[_extract_one(a) for a in deduped], return_exceptions=False)
@@ -465,13 +458,7 @@ async def async_sync_nyt(
 
     async def _extract_one(art: RawArticle) -> Tuple[RawArticle, Optional[Dict[str, Any]], List[str]]:
         async with sem:
-            context = raw_article_to_llm_context(art)
-            article_dict, ext_log = await async_extract_article_from_text(
-                context,
-                source_url=art.web_url,
-                backend=llm_backend,
-            )
-        return art, article_dict, ext_log
+            return await async_extract_raw_article(art, "nyt", backend=llm_backend)
 
     log.append(f"🚀 并发抽取 {len(deduped)} 篇（并发上限 {concurrency}）...")
     extract_results = await asyncio.gather(*[_extract_one(a) for a in deduped], return_exceptions=False)
@@ -620,13 +607,7 @@ async def async_sync_xinhua_tech(
 
     async def _extract_one(art: RawArticle) -> Tuple[RawArticle, Optional[Dict[str, Any]], List[str]]:
         async with sem:
-            context = raw_article_to_llm_context(art)
-            article_dict, ext_log = await async_extract_article_from_text(
-                context,
-                source_url=art.web_url,
-                backend=llm_backend,
-            )
-        return art, article_dict, ext_log
+            return await async_extract_raw_article(art, "xinhua_tech", backend=llm_backend)
 
     log.append(f"🚀 并发抽取 {len(deduped)} 篇（并发上限 {concurrency}）{dry_tag}...")
     extract_results = await asyncio.gather(*[_extract_one(a) for a in deduped], return_exceptions=False)
@@ -792,13 +773,7 @@ async def async_sync_sina_tech(
 
     async def _extract_one(art: RawArticle) -> Tuple[RawArticle, Optional[Dict[str, Any]], List[str]]:
         async with sem:
-            context = raw_article_to_llm_context(art)
-            article_dict, ext_log = await async_extract_article_from_text(
-                context,
-                source_url=art.web_url,
-                backend=llm_backend,
-            )
-        return art, article_dict, ext_log
+            return await async_extract_raw_article(art, "sina_tech", backend=llm_backend)
 
     log.append(f"🚀 并发抽取 {len(deduped)} 篇（并发上限 {concurrency}）{dry_tag}...")
     extract_results = await asyncio.gather(*[_extract_one(a) for a in deduped], return_exceptions=False)
@@ -963,13 +938,9 @@ async def async_sync_wechat_rss(
 
     async def _extract_one(art: RawArticle) -> Tuple[RawArticle, Optional[Dict[str, Any]], List[str]]:
         async with sem:
-            context = raw_article_to_llm_context(art)
-            article_dict, ext_log = await async_extract_article_from_text(
-                context,
-                source_url=art.web_url,
-                backend=llm_backend,
-            )
-        return art, article_dict, ext_log
+            feed_name = (art.section_name or "").replace("WeChat / ", "").strip()
+            source_tag = f"wechat_rss:{feed_name}" if feed_name else "wechat_rss"
+            return await async_extract_raw_article(art, source_tag, backend=llm_backend)
 
     log.append(f"🚀 并发抽取 {len(deduped)} 篇（并发上限 {concurrency}）{dry_tag}...")
     extract_results = await asyncio.gather(*[_extract_one(a) for a in deduped], return_exceptions=False)
@@ -1181,13 +1152,7 @@ async def async_sync_policy(
 
     async def _extract_one(art: RawArticle) -> Tuple[RawArticle, Optional[Dict[str, Any]], List[str]]:
         async with sem:
-            context = raw_article_to_llm_context(art)
-            article_dict, ext_log = await async_extract_article_from_text(
-                context,
-                source_url=art.web_url,
-                backend=llm_backend,
-            )
-        return art, article_dict, ext_log
+            return await async_extract_raw_article(art, _policy_source_tag(art), backend=llm_backend)
 
     log.append(f"🚀 并发抽取 {len(deduped)} 篇（并发上限 {concurrency}）{dry_tag}...")
     extract_results = await asyncio.gather(*[_extract_one(a) for a in deduped], return_exceptions=False)

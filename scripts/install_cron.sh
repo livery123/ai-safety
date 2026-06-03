@@ -18,7 +18,16 @@ fi
 
 CURRENT="$(crontab -l 2>/dev/null || true)"
 if echo "$CURRENT" | grep -qF "$MARKER"; then
-  echo "cron 已存在（$MARKER），无需重复安装。"
+  echo "cron 已存在（$MARKER），同步更新文献调度为示例配置…"
+  BLOCK="$(sed "s|^ROOT=.*|ROOT=$ROOT|; s|^PY=.*|PY=$PY|" "$EXAMPLE")"
+  # 保留 MARKER 之前的内容，用最新示例块替换 ai-safety 块
+  BEFORE="$(echo "$CURRENT" | sed "/$MARKER/,\$d" | sed '/^$/d')"
+  {
+    [[ -n "$BEFORE" ]] && printf '%s\n\n' "$BEFORE"
+    printf '%s\n' "$MARKER"
+    printf '%s\n' "$BLOCK"
+  } | crontab -
+  echo "cron 已更新。"
 else
   BLOCK="$(sed "s|^ROOT=.*|ROOT=$ROOT|; s|^PY=.*|PY=$PY|" "$EXAMPLE")"
   {

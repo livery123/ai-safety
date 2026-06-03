@@ -76,8 +76,29 @@ def _parse_json_list_safe(val: Any) -> List[Any]:
     return []
 
 
+def _format_entities_display(
+    publish_authority: Any,
+    ents_raw: Any,
+    intl_raw: Any,
+) -> str:
+    """涉及主体：优先发布机关，再补其他实体与国际组织。"""
+    parts: List[str] = []
+    auth = str(publish_authority or "").strip()
+    if auth:
+        parts.append(auth)
+    for x in _parse_json_list_safe(intl_raw):
+        s = str(x).strip()
+        if s and s not in parts:
+            parts.append(s)
+    for x in _parse_json_list_safe(ents_raw):
+        s = str(x).strip()
+        if s and s not in parts:
+            parts.append(s)
+    return "、".join(parts[:8])
+
+
 def _finalize_row_df(df: pd.DataFrame) -> pd.DataFrame:
-    """补齐子域、主体、标签、主域归一。"""
+    """补齐子域、主体、标签、主域归一与发布地理字段。"""
     if df.empty:
         return pd.DataFrame(
             columns=[
@@ -88,6 +109,10 @@ def _finalize_row_df(df: pd.DataFrame) -> pd.DataFrame:
                 "main_topic",
                 "子域",
                 "涉及主体",
+                "发布国家",
+                "发布地区",
+                "发布主体",
+                "国际组织",
                 "标签",
                 "摘要",
                 "来源平台",
@@ -97,15 +122,36 @@ def _finalize_row_df(df: pd.DataFrame) -> pd.DataFrame:
         )
     subs = df["_subs"].apply(_parse_json_list_safe)
     df["子域"] = subs.apply(lambda L: str(L[0]).strip() if L else "未指定子域")
-    ents = df["_ents"].apply(_parse_json_list_safe)
-    df["涉及主体"] = ents.apply(
-        lambda L: "、".join(str(x).strip() for x in L[:8] if str(x).strip()) if L else ""
-    )
+    if "publish_authority" in df.columns:
+        df["涉及主体"] = df.apply(
+            lambda r: _format_entities_display(
+                r.get("publish_authority"),
+                r.get("_ents"),
+                r.get("_intl"),
+            ),
+            axis=1,
+        )
+    else:
+        ents = df["_ents"].apply(_parse_json_list_safe)
+        df["涉及主体"] = ents.apply(
+            lambda L: "、".join(str(x).strip() for x in L[:8] if str(x).strip()) if L else ""
+        )
+    if "publish_country" in df.columns:
+        df["发布国家"] = df["publish_country"].fillna("").astype(str).str.strip()
+    if "publish_region" in df.columns:
+        df["发布地区"] = df["publish_region"].fillna("").astype(str).str.strip()
+    if "publish_authority" in df.columns:
+        df["发布主体"] = df["publish_authority"].fillna("").astype(str).str.strip()
+    if "_intl" in df.columns:
+        intl = df["_intl"].apply(_parse_json_list_safe)
+        df["国际组织"] = intl.apply(
+            lambda L: "、".join(str(x).strip() for x in L if str(x).strip())
+        )
     tags = df["_tags"].apply(_parse_json_list_safe)
     df["标签"] = tags.apply(lambda L: ",".join(str(x).strip() for x in L if str(x).strip()))
     if "主域" in df.columns:
         df["主域"] = df["主域"].map(lambda x: coerce_risk_domain(str(x)))
-    return df.drop(columns=["_subs", "_ents", "_tags"], errors="ignore")
+    return df.drop(columns=["_subs", "_ents", "_tags", "_intl"], errors="ignore")
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +222,10 @@ def fetch_policy_track_page(
         e.main_topic AS main_topic,
         e.risk_subdomains_json AS _subs,
         e.entities_json AS _ents,
+        e.international_orgs_json AS _intl,
+        e.publish_country,
+        e.publish_region,
+        e.publish_authority,
         a.summary_raw AS `摘要`,
         a.source AS `来源平台`,
         a.normalized_url AS URL,
@@ -213,7 +263,7 @@ def aggregate_policy_by_week(limit_weeks: int = 16) -> pd.DataFrame:
     where_sql, binds = _policy_where_clause(None)
     sql = f"""
     SELECT
-      DATE_FORMAT(COALESCE(a.published_at, e.created_at), '%X-W%V') AS week_bucket,
+      DATE_FORMAT(COALESCE(a.published_at, e.created_at), '%%X-W%%V') AS week_bucket,
       MIN(COALESCE(a.published_at, e.created_at)) AS sort_ts,
       COUNT(*) AS cnt
     FROM article_extractions e
@@ -225,6 +275,152 @@ def aggregate_policy_by_week(limit_weeks: int = 16) -> pd.DataFrame:
     LIMIT %s
     """
     return _read_sql_dataframe(sql, tuple(list(binds) + [lw]))
+
+
+def aggregate_policy_by_publish_country(limit: int = 20) -> pd.DataFrame:
+    """按 publish_country 聚合 policy/report 条数。"""
+    lm = max(3, min(int(limit), 50))
+    where_sql, binds = _policy_where_clause(None)
+    sql = f"""
+    SELECT e.publish_country AS label, COUNT(*) AS cnt
+    FROM article_extractions e
+    INNER JOIN articles a ON a.id = e.article_id
+    WHERE {where_sql}
+      AND e.publish_country IS NOT NULL AND e.publish_country != ''
+    GROUP BY e.publish_country
+    ORDER BY cnt DESC
+    LIMIT %s
+    """
+    return _read_sql_dataframe(sql, tuple(list(binds) + [lm]))
+
+
+def aggregate_policy_by_publish_region(limit: int = 20) -> pd.DataFrame:
+    """按 publish_region 聚合（欧盟、台湾等）。"""
+    lm = max(3, min(int(limit), 50))
+    where_sql, binds = _policy_where_clause(None)
+    sql = f"""
+    SELECT e.publish_region AS label, COUNT(*) AS cnt
+    FROM article_extractions e
+    INNER JOIN articles a ON a.id = e.article_id
+    WHERE {where_sql}
+      AND e.publish_region IS NOT NULL AND e.publish_region != ''
+    GROUP BY e.publish_region
+    ORDER BY cnt DESC
+    LIMIT %s
+    """
+    return _read_sql_dataframe(sql, tuple(list(binds) + [lm]))
+
+
+def aggregate_policy_publish_coverage() -> Dict[str, Any]:
+    """
+    功能：政策发布地理覆盖度 KPI。
+    输出：sovereign_count/names、region_count/names、intl_org_doc_count、missing_geo_count、meets_kpi。
+    """
+    where_sql, binds = _policy_where_clause(None)
+    sql = f"""
+    SELECT
+        e.publish_country,
+        e.publish_region,
+        e.international_orgs_json
+    FROM article_extractions e
+    INNER JOIN articles a ON a.id = e.article_id
+    WHERE {where_sql}
+    """
+    df = _read_sql_dataframe(sql, tuple(binds))
+    sovereign_names: List[str] = []
+    region_names: List[str] = []
+    intl_doc_count = 0
+    missing_geo_count = 0
+    if df.empty:
+        return {
+            "sovereign_count": 0,
+            "sovereign_names": [],
+            "region_count": 0,
+            "region_names": [],
+            "intl_org_doc_count": 0,
+            "missing_geo_count": 0,
+            "meets_kpi": False,
+        }
+    sovereign_set: set[str] = set()
+    region_set: set[str] = set()
+    for _, row in df.iterrows():
+        country = str(row.get("publish_country") or "").strip()
+        region = str(row.get("publish_region") or "").strip()
+        intl = _parse_json_list_safe(row.get("international_orgs_json"))
+        if country:
+            sovereign_set.add(country)
+        if region:
+            region_set.add(region)
+        if intl:
+            intl_doc_count += 1
+        if not country and not region:
+            missing_geo_count += 1
+    sovereign_names = sorted(sovereign_set)
+    region_names = sorted(region_set)
+    sovereign_count = len(sovereign_names)
+    meets_kpi = sovereign_count >= 5 and intl_doc_count >= 1
+    return {
+        "sovereign_count": sovereign_count,
+        "sovereign_names": sovereign_names,
+        "region_count": len(region_names),
+        "region_names": region_names,
+        "intl_org_doc_count": intl_doc_count,
+        "missing_geo_count": missing_geo_count,
+        "meets_kpi": meets_kpi,
+    }
+
+
+def aggregate_policy_wordcloud_tokens(
+    limit: int = 40,
+    field: str = "mixed",
+) -> pd.DataFrame:
+    """
+    功能：政策词云词频（发布机关 / 标签 / 国际组织）。
+    输入：limit 上限；field=authority|tags|intl|mixed。
+    输出：DataFrame columns: text, value, category。
+    """
+    lm = max(5, min(int(limit), 120))
+    fld = (field or "mixed").strip().lower()
+    where_sql, binds = _policy_where_clause(None)
+    sql = f"""
+    SELECT
+        e.publish_authority,
+        e.international_orgs_json,
+        e.tags_raw
+    FROM article_extractions e
+    INNER JOIN articles a ON a.id = e.article_id
+    WHERE {where_sql}
+    """
+    df = _read_sql_dataframe(sql, tuple(binds))
+    from collections import Counter
+
+    counter: Counter[str] = Counter()
+    categories: Dict[str, str] = {}
+
+    def _add(text: str, cat: str, weight: int = 1) -> None:
+        t = text.strip()
+        if not t or len(t) < 2:
+            return
+        counter[t] += weight
+        if t not in categories:
+            categories[t] = cat
+
+    if not df.empty:
+        for _, row in df.iterrows():
+            auth = str(row.get("publish_authority") or "").strip()
+            if auth and fld in ("authority", "mixed"):
+                _add(auth, "authority")
+            if fld in ("intl", "mixed"):
+                for x in _parse_json_list_safe(row.get("international_orgs_json")):
+                    _add(str(x), "intl_org")
+            if fld in ("tags", "mixed"):
+                for x in _parse_json_list_safe(row.get("tags_raw")):
+                    _add(str(x), "tag")
+
+    rows = []
+    for text, value in counter.most_common(lm):
+        rows.append({"text": text, "value": int(value), "category": categories.get(text, "tag")})
+    return pd.DataFrame(rows, columns=["text", "value", "category"])
 
 
 def count_policy_recent_days(days: int = 7, *, keyword: Optional[str] = None) -> int:
@@ -267,6 +463,10 @@ def fetch_policy_recent_rows(
         e.main_topic AS main_topic,
         e.risk_subdomains_json AS _subs,
         e.entities_json AS _ents,
+        e.international_orgs_json AS _intl,
+        e.publish_country,
+        e.publish_region,
+        e.publish_authority,
         a.summary_raw AS `摘要`,
         a.source AS `来源平台`,
         a.normalized_url AS URL,
@@ -381,7 +581,7 @@ def aggregate_meeting_by_week(limit_weeks: int = 16) -> pd.DataFrame:
     where_sql, binds = _meeting_where_clause(None)
     sql = f"""
     SELECT
-      DATE_FORMAT(COALESCE(a.published_at, e.created_at), '%X-W%V') AS week_bucket,
+      DATE_FORMAT(COALESCE(a.published_at, e.created_at), '%%X-W%%V') AS week_bucket,
       MIN(COALESCE(a.published_at, e.created_at)) AS sort_ts,
       COUNT(*) AS cnt
     FROM article_extractions e
@@ -657,7 +857,7 @@ def aggregate_literature_by_week(limit_weeks: int = 16) -> pd.DataFrame:
     lw = max(4, min(int(limit_weeks), 104))
     sql = """
     SELECT
-      DATE_FORMAT(COALESCE(published_at, created_at), '%X-W%V') AS week_bucket,
+      DATE_FORMAT(COALESCE(published_at, created_at), '%%X-W%%V') AS week_bucket,
       MIN(COALESCE(published_at, created_at)) AS sort_ts,
       COUNT(*) AS cnt
     FROM literature_items

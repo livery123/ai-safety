@@ -47,8 +47,8 @@ SUBSYSTEM_SCHEDULES: Dict[str, SubsystemSchedule] = {
         task_name="crawl_literature",
         label="国内外相关文献监测系统",
         status_label_healthy="自动更新中",
-        sla_hours=13.0,
-        daily_run_times=((3, 0), (15, 0)),
+        sla_hours=25.0,
+        daily_run_times=((21, 0),),
     ),
 }
 

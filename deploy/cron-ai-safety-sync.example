@@ -15,8 +15,8 @@ LOG=/tmp/ai-safety-sync.log
 # LLM 自动分类：多数 policy/report，少数 meeting
 0 */6 * * * cd $ROOT && $PY scripts/sync_sources.py --source news --no-rag >> $LOG 2>&1
 
-# 文献三源，每天 03:00 与 15:00（参数对齐 Streamlit 手动默认）
-0 3,15 * * * cd $ROOT && $PY scripts/sync_sources.py --source literature --literature-sources arxiv scopus springer --max-articles 3 --no-rag >> $LOG 2>&1
+# 文献三源，每天 21:00（参数对齐 Streamlit 手动默认）
+0 21 * * * cd $ROOT && $PY scripts/sync_sources.py --source literature --literature-sources arxiv scopus springer --max-articles 3 --no-rag >> $LOG 2>&1
 
 # AI 治理监测周报（上一完整自然周，policy/meeting/literature/platform + 简报）
 # 独立日志：/var/log/ai-safety-weekly.log

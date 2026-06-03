@@ -66,6 +66,7 @@ class ArticleExtractionPayload(BaseModel):
 
     落库 MySQL `article_extractions` 的字段映射：
     content_type, main_topic, risk_domain, risk_subdomains→JSON, entities→JSON,
+    publish_country, publish_region, international_orgs→JSON, publish_authority,
     summary_structured, tags→JSON。`model_name` 由服务端写入，勿出现在 JSON 根上。
 
     仅流程控制、不落 extraction 表：``is_relevant``、``reject_reason``、``relevance_reason``。
@@ -102,7 +103,26 @@ class ArticleExtractionPayload(BaseModel):
     )
     entities: List[str] = Field(
         default_factory=list,
-        description="主要机构、公司、政府、人物（落库 entities_json）",
+        description="文中提及的其他机构/人物（不含发布主体 publish_authority）",
+    )
+    publish_country: str = Field(
+        default="",
+        max_length=64,
+        description="发布主权国家中文规范名（台湾/港/澳属中国）",
+    )
+    publish_region: str = Field(
+        default="",
+        max_length=128,
+        description="发布次级区域（欧盟、台湾、香港等）",
+    )
+    international_orgs: List[str] = Field(
+        default_factory=list,
+        description="相关国际组织（联合国、OECD 等）",
+    )
+    publish_authority: str = Field(
+        default="",
+        max_length=256,
+        description="法定发文机关/发布主体（不含正文引用的企业或媒体）",
     )
     summary_structured: str = Field(
         default="",

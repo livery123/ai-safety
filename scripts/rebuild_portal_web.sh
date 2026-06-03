@@ -5,9 +5,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WEB="$ROOT/web"
-NPM="${NPM:-$HOME/.local/node-extract/bin/npm}"
+NODE_BIN="${NODE_BIN:-$HOME/.local/node-extract/bin}"
+NPM="${NPM:-$NODE_BIN/npm}"
 PORT="${PORTAL_WEB_PORT:-3001}"
 LOG="/tmp/ai-safety-web.log"
+
+# npm/next 依赖 node 在 PATH 中
+export PATH="$NODE_BIN:${PATH:-/usr/bin:/bin}"
 
 if [[ ! -x "$NPM" ]]; then
   echo "未找到 npm: $NPM"
@@ -19,8 +23,13 @@ cd "$WEB"
 "$NPM" run build
 
 echo "=== 2/3 停止旧 next-server (port $PORT) ==="
+if command -v fuser >/dev/null 2>&1; then
+  fuser -k "${PORT}/tcp" 2>/dev/null || true
+else
+  pid="$(ss -tlnp 2>/dev/null | grep ":${PORT} " | grep -oP 'pid=\K[0-9]+' | head -1)"
+  [[ -n "${pid:-}" ]] && kill "$pid" 2>/dev/null || true
+fi
 pkill -f "next start.*-p $PORT" 2>/dev/null || true
-pkill -f "next-server.*$PORT" 2>/dev/null || true
 sleep 1
 
 echo "=== 3/3 启动 next start -p $PORT ==="

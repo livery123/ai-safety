@@ -14,7 +14,20 @@ from typing import Any, List, Optional
 
 import pandas as pd
 
-from api.schemas import IncidentItem, KeywordItem, LiteratureItem, SourceFilterOption, SourceFilterResponse, StatsResponse, SystemInfo, WeeklySummaryResponse
+from api.schemas import (
+    IncidentItem,
+    KeywordItem,
+    LiteratureItem,
+    PolicyAnalyticsResponse,
+    PolicyCountItem,
+    PolicyCoverageStats,
+    PolicyWordItem,
+    SourceFilterOption,
+    SourceFilterResponse,
+    StatsResponse,
+    SystemInfo,
+    WeeklySummaryResponse,
+)
 from core.source_registry import TRACK_PANEL_TITLE, normalize_selected_keys
 from core.mysql_dashboard import (
     count_dashboard_incidents,
@@ -24,6 +37,11 @@ from core.mysql_dashboard import (
     get_dashboard_stats,
 )
 from core.mysql_monitor_tracks import (
+    aggregate_policy_by_publish_country,
+    aggregate_policy_by_publish_region,
+    aggregate_policy_by_week,
+    aggregate_policy_publish_coverage,
+    aggregate_policy_wordcloud_tokens,
     fetch_literature_track_page,
     fetch_meeting_track_page,
     fetch_policy_track_page,
@@ -108,6 +126,90 @@ def get_keywords(limit: int = 20) -> List[KeywordItem]:
         return []
 
 
+def get_policy_analytics(
+    *,
+    country_limit: int = 12,
+    word_limit: int = 40,
+    word_field: str = "mixed",
+    week_limit: int = 16,
+) -> PolicyAnalyticsResponse:
+    """
+    功能：政策可视化分析（覆盖度、国家分布、周趋势、词云）。
+    输入：各模块 limit 与 word_field。
+    输出：PolicyAnalyticsResponse；只读。
+    """
+    try:
+        cov_raw = aggregate_policy_publish_coverage()
+        coverage = PolicyCoverageStats(
+            sovereign_count=int(cov_raw.get("sovereign_count") or 0),
+            sovereign_names=list(cov_raw.get("sovereign_names") or []),
+            region_count=int(cov_raw.get("region_count") or 0),
+            region_names=list(cov_raw.get("region_names") or []),
+            intl_org_doc_count=int(cov_raw.get("intl_org_doc_count") or 0),
+            missing_geo_count=int(cov_raw.get("missing_geo_count") or 0),
+            meets_kpi=bool(cov_raw.get("meets_kpi")),
+        )
+
+        by_country: List[PolicyCountItem] = []
+        country_df = aggregate_policy_by_publish_country(country_limit)
+        for _, row in country_df.iterrows():
+            by_country.append(
+                PolicyCountItem(
+                    label=str(row.get("label") or ""),
+                    count=int(pd.to_numeric(row.get("cnt"), errors="coerce") or 0),
+                    kind="sovereign",
+                )
+            )
+        region_df = aggregate_policy_by_publish_region(country_limit)
+        for _, row in region_df.iterrows():
+            label = str(row.get("label") or "").strip()
+            if not label:
+                continue
+            if any(x.label == label for x in by_country):
+                continue
+            by_country.append(
+                PolicyCountItem(
+                    label=label,
+                    count=int(pd.to_numeric(row.get("cnt"), errors="coerce") or 0),
+                    kind="region",
+                )
+            )
+        by_country.sort(key=lambda x: x.count, reverse=True)
+        by_country = by_country[: max(1, min(country_limit, 20))]
+
+        week_df = aggregate_policy_by_week(week_limit)
+        by_week: List[KeywordItem] = []
+        if not week_df.empty:
+            week_df = week_df.sort_values("sort_ts")
+            for _, row in week_df.iterrows():
+                by_week.append(
+                    KeywordItem(
+                        keyword=str(row.get("week_bucket") or ""),
+                        count=int(pd.to_numeric(row.get("cnt"), errors="coerce") or 0),
+                    )
+                )
+
+        wc_df = aggregate_policy_wordcloud_tokens(word_limit, word_field)
+        wordcloud: List[PolicyWordItem] = []
+        for _, row in wc_df.iterrows():
+            wordcloud.append(
+                PolicyWordItem(
+                    text=str(row.get("text") or ""),
+                    value=int(pd.to_numeric(row.get("value"), errors="coerce") or 0),
+                    category=str(row.get("category") or "tag"),
+                )
+            )
+
+        return PolicyAnalyticsResponse(
+            coverage=coverage,
+            by_country=by_country,
+            by_week=by_week,
+            wordcloud=wordcloud,
+        )
+    except Exception:
+        return PolicyAnalyticsResponse(coverage=PolicyCoverageStats())
+
+
 def _row_to_incident(row: pd.Series, *, with_id: bool = True) -> IncidentItem:
     """DataFrame 行 → IncidentItem；兼容中英文列名。"""
     title = str(row.get("标题") or row.get("title") or "").strip()
@@ -129,6 +231,10 @@ def _row_to_incident(row: pd.Series, *, with_id: bool = True) -> IncidentItem:
         url=url if url.startswith("http") else "",
         tags=tags,
         published_at=_iso_dt(row.get("时间") or row.get("published_at")),
+        publish_country=str(row.get("发布国家") or row.get("publish_country") or ""),
+        publish_region=str(row.get("发布地区") or row.get("publish_region") or ""),
+        publish_authority=str(row.get("发布主体") or row.get("publish_authority") or ""),
+        international_orgs=str(row.get("国际组织") or row.get("international_orgs") or ""),
     )
 
 

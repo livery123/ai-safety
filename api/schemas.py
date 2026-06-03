@@ -29,6 +29,43 @@ class KeywordItem(BaseModel):
     count: int
 
 
+class PolicyCountItem(BaseModel):
+    """政策按国家/区域计数项。"""
+
+    label: str
+    count: int
+    kind: str = Field(description="sovereign | region")
+
+
+class PolicyWordItem(BaseModel):
+    """词云词条。"""
+
+    text: str
+    value: int
+    category: str = Field(description="authority | tag | intl_org")
+
+
+class PolicyCoverageStats(BaseModel):
+    """政策发布地理覆盖度 KPI。"""
+
+    sovereign_count: int = 0
+    sovereign_names: List[str] = Field(default_factory=list)
+    region_count: int = 0
+    region_names: List[str] = Field(default_factory=list)
+    intl_org_doc_count: int = 0
+    missing_geo_count: int = 0
+    meets_kpi: bool = False
+
+
+class PolicyAnalyticsResponse(BaseModel):
+    """政策可视化分析聚合响应。"""
+
+    coverage: PolicyCoverageStats
+    by_country: List[PolicyCountItem] = Field(default_factory=list)
+    by_week: List[KeywordItem] = Field(default_factory=list)
+    wordcloud: List[PolicyWordItem] = Field(default_factory=list)
+
+
 class IncidentItem(BaseModel):
     """单条情报/新闻卡片。"""
 
@@ -43,6 +80,10 @@ class IncidentItem(BaseModel):
     url: str = ""
     tags: List[str] = Field(default_factory=list)
     published_at: Optional[str] = None
+    publish_country: str = ""
+    publish_region: str = ""
+    publish_authority: str = ""
+    international_orgs: str = ""
 
 
 class LiteratureItem(BaseModel):
