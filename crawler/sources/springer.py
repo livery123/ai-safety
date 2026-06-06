@@ -424,25 +424,122 @@ class SpringerSubscriber:
         return SpringerSubscriber._parse_date(value)
 
     @staticmethod
-    def _extract_authors(soup: BeautifulSoup) -> List[dict]:
-        authors: List[dict] = []
+    def _extract_authors(soup: BeautifulSoup) -> dict[str, dict]:
+        """
+        Extract authors and affiliations from Springer article page.
 
-        for node in soup.select("li.c-article-author-affiliation"):
-            name_node = node.select_one("p.c-article-author-affiliation__authors-list")
-            address_node = node.select_one("p.c-article-author-affiliation__address")
+        This version uses the bottom section:
+            Author information -> Authors and Affiliations
 
-            name = SpringerSubscriber._clean_text(name_node.get_text(" ")) if name_node else ""
-            address = SpringerSubscriber._clean_text(address_node.get_text(" ")) if address_node else ""
+        Return format keeps compatibility with the old crawler:
+            {
+                "author-Aoqi-Yin-Aff1": {
+                    "popup_id": "author-Aoqi-Yin-Aff1",
+                    "popup_html_id": None,
+                    "name": "Aoqi Yin",
+                    "affiliations": ["School of Engineering, ..."],
+                    "search_publications_url": None,
+                    "external_links": {},
+                    "source": "authors_and_affiliations"
+                }
+            }
+        """
+        author_map: dict[str, dict] = {}
 
-            if name:
-                authors.append(
-                    {
-                        "name": name,
-                        "address": address,
-                    }
-                )
+        def split_author_names(author_text: str) -> list[str]:
+            author_text = SpringerSubscriber._clean_text(author_text)
 
-        return authors
+            if not author_text:
+                return []
+
+            author_text = author_text.replace(" & ", ", ")
+            author_text = author_text.replace(" and ", ", ")
+
+            return [
+                SpringerSubscriber._clean_text(name)
+                for name in author_text.split(",")
+                if SpringerSubscriber._clean_text(name)
+            ]
+
+        author_info_heading = None
+
+        for heading in soup.find_all(["h2", "h3"]):
+            heading_text = SpringerSubscriber._clean_text(heading.get_text(" "))
+            if heading_text.lower() == "author information":
+                author_info_heading = heading
+                break
+
+        if not author_info_heading:
+            return author_map
+
+        container = author_info_heading.find_parent("section") or author_info_heading.parent
+        if not container:
+            return author_map
+
+        aff_heading = None
+
+        for heading in container.find_all(["h2", "h3", "h4"]):
+            heading_text = SpringerSubscriber._clean_text(heading.get_text(" "))
+            if "authors and affiliations" in heading_text.lower():
+                aff_heading = heading
+                break
+
+        if not aff_heading:
+            return author_map
+
+        aff_list = aff_heading.find_next("ol")
+        if not aff_list:
+            return author_map
+
+        for aff_index, li in enumerate(aff_list.find_all("li", recursive=False), start=1):
+            parts = [
+                SpringerSubscriber._clean_text(node.get_text(" "))
+                for node in li.find_all(["p", "div"], recursive=False)
+                if SpringerSubscriber._clean_text(node.get_text(" "))
+            ]
+
+            if not parts:
+                text = SpringerSubscriber._clean_text(li.get_text(" "))
+                if text:
+                    parts = [text]
+
+            if not parts:
+                continue
+
+            affiliation = parts[0]
+            author_text = parts[1] if len(parts) > 1 else ""
+            author_names = split_author_names(author_text)
+
+            if not author_names:
+                author_key = f"affiliation-{aff_index}"
+
+                author_map[author_key] = {
+                    "popup_id": author_key,
+                    "popup_html_id": None,
+                    "name": None,
+                    "affiliations": [affiliation],
+                    "search_publications_url": None,
+                    "external_links": {},
+                    "source": "authors_and_affiliations",
+                }
+
+                continue
+
+            for author_name in author_names:
+                safe_name = re.sub(r"[^A-Za-z0-9]+", "-", author_name).strip("-")
+                author_key = f"author-{safe_name}-Aff{aff_index}"
+
+                author_map[author_key] = {
+                    "popup_id": author_key,
+                    "popup_html_id": None,
+                    "name": author_name,
+                    "affiliations": [affiliation],
+                    "search_publications_url": None,
+                    "external_links": {},
+                    "source": "authors_and_affiliations",
+                }
+
+        return author_map
 
     @staticmethod
     def _extract_keywords(soup: BeautifulSoup) -> List[str]:
