@@ -10,12 +10,15 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
+from core.config import MEETING_DISCOVERY_MIN_SCORE
 from core.meeting_catalog import (
     CatalogMatch,
+    find_best_catalog_match,
     find_seed_event,
     get_series_by_key,
     match_catalog_key,
 )
+from core.mysql_meeting_events import insert_discovery_candidate
 from core.mysql_meeting_events import (
     get_event_by_id,
     get_or_create_event,
@@ -64,6 +67,29 @@ def link_article_to_meeting_event(
         edition_hint=str(ext.get("meeting_edition_hint") or ""),
     )
     if not match:
+        proposed = str(ext.get("proposed_series_name") or "").strip()
+        best = find_best_catalog_match(
+            title=title,
+            summary=summary,
+            main_topic=str(ext.get("main_topic") or ""),
+            tags=tags,
+            entities=entities,
+            llm_catalog_key=str(ext.get("meeting_catalog_key") or ""),
+            edition_hint=proposed or str(ext.get("meeting_edition_hint") or ""),
+        )
+        score = float(best.score) if best else 0.0
+        if proposed or score >= MEETING_DISCOVERY_MIN_SCORE:
+            try:
+                insert_discovery_candidate(
+                    article_id=article_id,
+                    title=title[:512],
+                    proposed_series_name=proposed,
+                    meeting_catalog_key=str(best.catalog_key if best else ext.get("meeting_catalog_key") or ""),
+                    match_score=score,
+                    reason="linker_no_event_match",
+                )
+            except Exception:
+                pass
         return None
 
     series = get_series_by_key(match.catalog_key)

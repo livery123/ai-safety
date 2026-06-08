@@ -19,6 +19,12 @@ _CATALOG_JSON = _DATA_DIR / "conference_catalog.json"
 
 _YEAR_RE = re.compile(r"(20[2-3][0-9])")
 
+_DEFAULT_PREFERRED_SOURCES: Tuple[str, ...] = ("nyt", "guardian")
+_SERIES_SOURCE_DEFAULTS: Dict[str, Tuple[str, ...]] = {
+    "waic": ("guardian", "nyt"),
+    "un_ai_governance_dialogue": ("guardian", "nyt"),
+}
+
 
 @dataclass
 class CatalogEventSeed:
@@ -34,6 +40,7 @@ class CatalogEventSeed:
     status: str = "scheduled"
     notes: str = ""
     crawl_urls: List[str] = field(default_factory=list)
+    manual_ingest_urls: List[str] = field(default_factory=list)
     participating_countries: List[str] = field(default_factory=list)
     outcomes_summary: str = ""
 
@@ -50,6 +57,7 @@ class CatalogSeries:
     aliases: List[str] = field(default_factory=list)
     topics: List[str] = field(default_factory=list)
     official_urls: List[str] = field(default_factory=list)
+    preferred_sources: List[str] = field(default_factory=list)
     reference_url: str = ""
     events: List[CatalogEventSeed] = field(default_factory=list)
 
@@ -102,6 +110,11 @@ def load_catalog_series() -> List[CatalogSeries]:
             crawl_urls = [
                 str(u).strip() for u in (ev.get("crawl_urls") or []) if str(u).strip()
             ]
+            manual_urls = [
+                str(u).strip()
+                for u in (ev.get("manual_ingest_urls") or [])
+                if str(u).strip()
+            ]
             countries = [
                 str(c).strip()
                 for c in (ev.get("participating_countries") or [])
@@ -123,10 +136,16 @@ def load_catalog_series() -> List[CatalogSeries]:
                     status=str(ev.get("status") or "scheduled")[:32],
                     notes="；".join(p for p in notes_parts if p),
                     crawl_urls=crawl_urls,
+                    manual_ingest_urls=manual_urls,
                     participating_countries=countries,
                     outcomes_summary=outcomes,
                 )
             )
+        pref = [
+            str(s).strip().lower()
+            for s in (raw.get("preferred_sources") or [])
+            if str(s).strip()
+        ]
         aliases = [str(a).strip() for a in (raw.get("aliases") or []) if str(a).strip()]
         topics = [str(t).strip() for t in (raw.get("topics") or []) if str(t).strip()]
         urls = [str(u).strip() for u in (raw.get("official_urls") or []) if str(u).strip()]
@@ -140,6 +159,7 @@ def load_catalog_series() -> List[CatalogSeries]:
                 aliases=aliases,
                 topics=topics,
                 official_urls=urls,
+                preferred_sources=pref,
                 reference_url=ref,
                 events=evs,
             )
@@ -215,6 +235,140 @@ def match_catalog_key(
                 if best is None or cand.score > best.score:
                     best = cand
     return best
+
+
+def find_best_catalog_match(
+    *,
+    title: str = "",
+    summary: str = "",
+    main_topic: str = "",
+    tags: Optional[List[str]] = None,
+    entities: Optional[List[str]] = None,
+    llm_catalog_key: str = "",
+    edition_hint: str = "",
+) -> Optional[CatalogMatch]:
+    """功能：返回最高分匹配（含低分），供 discovery 审计。"""
+    m = match_catalog_key(
+        title=title,
+        summary=summary,
+        main_topic=main_topic,
+        tags=tags,
+        entities=entities,
+        llm_catalog_key=llm_catalog_key,
+        edition_hint=edition_hint,
+    )
+    if m:
+        return m
+    proposed = _norm_text(str(edition_hint or main_topic or title))
+    if not proposed:
+        return None
+    best: Optional[CatalogMatch] = None
+    for series in load_catalog_series():
+        for alias in [series.series_name] + series.aliases:
+            al = _norm_text(alias)
+            if len(al) < 4:
+                continue
+            if al in proposed or proposed in al:
+                score = min(0.85, len(al) / max(len(proposed), 1) + 0.3)
+                cand = CatalogMatch(
+                    catalog_key=series.catalog_key,
+                    score=score,
+                    edition_year=_extract_year_from_text(proposed),
+                    matched_alias=alias,
+                )
+                if best is None or cand.score > best.score:
+                    best = cand
+    return best
+
+
+def get_preferred_sources(catalog_key: str) -> List[str]:
+    """
+    功能：按系列返回定向新闻源顺序（nyt / guardian）。
+    输入：catalog_key。
+    输出：如 ["guardian", "nyt"]。
+    """
+    series = get_series_by_key(catalog_key)
+    if series and series.preferred_sources:
+        out = [s for s in series.preferred_sources if s in ("nyt", "guardian")]
+        if out:
+            return out
+    k = (catalog_key or "").strip().lower()
+    if k in _SERIES_SOURCE_DEFAULTS:
+        return list(_SERIES_SOURCE_DEFAULTS[k])
+    return list(_DEFAULT_PREFERRED_SOURCES)
+
+
+def _catalog_url_hosts() -> List[Tuple[str, str]]:
+    """(host 子串, catalog_key) 用于官网 URL 提示。"""
+    pairs: List[Tuple[str, str]] = []
+    for series in load_catalog_series():
+        for u in series.official_urls:
+            host = _url_host_fragment(u)
+            if host:
+                pairs.append((host, series.catalog_key))
+        for ev in series.events:
+            for u in [ev.official_url] + ev.crawl_urls + ev.manual_ingest_urls:
+                host = _url_host_fragment(u)
+                if host:
+                    pairs.append((host, series.catalog_key))
+    return pairs
+
+
+def _url_host_fragment(url: str) -> str:
+    u = (url or "").strip().lower()
+    if "://" in u:
+        u = u.split("://", 1)[1]
+    return u.split("/")[0][:128]
+
+
+def resolve_meeting_official_hint(url: str) -> Tuple[str, str]:
+    """
+    功能：若 URL 属于名录官网/成果页，返回 (catalog_key, 附加提示文案)。
+    输入：文章 URL。
+    输出：空串表示非官网域。
+    """
+    frag = _url_host_fragment(url)
+    if not frag:
+        return "", ""
+    for host, ck in _catalog_url_hosts():
+        if host and host in frag:
+            return ck, (
+                f"该 URL 属于会议系列 {ck} 的官网或成果页；"
+                "content_type 优先 meeting，填写 meeting_catalog_key 与 meeting_phase。"
+            )
+    return "", ""
+
+
+def iter_meeting_ingest_urls(
+    *,
+    catalog_key: Optional[str] = None,
+    edition_year: Optional[int] = None,
+) -> List[CrawlUrlItem]:
+    """
+    功能：汇总 manual_ingest_urls + crawl_urls + official_url（可按系列/届次过滤）。
+    输出：去重 CrawlUrlItem。
+    """
+    seen: set[str] = set()
+    out: List[CrawlUrlItem] = []
+    ck_filter = (catalog_key or "").strip().lower()
+    for series in load_catalog_series():
+        if ck_filter and series.catalog_key.lower() != ck_filter:
+            continue
+        for ev in series.events:
+            if edition_year is not None and ev.edition_year != edition_year:
+                continue
+            for u in ev.manual_ingest_urls + ev.crawl_urls + [ev.official_url]:
+                u = (u or "").strip()
+                if u and u not in seen:
+                    seen.add(u)
+                    out.append(
+                        CrawlUrlItem(
+                            url=u,
+                            catalog_key=series.catalog_key,
+                            edition_label=ev.edition_label,
+                        )
+                    )
+    return out
 
 
 def find_seed_event(series: CatalogSeries, edition_year: Optional[int]) -> Optional[CatalogEventSeed]:

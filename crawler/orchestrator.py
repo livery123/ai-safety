@@ -66,7 +66,9 @@ from crawler.sources.literature import (
 # 避免仅 import orchestrator 就要求 chromadb 存在。
 
 # 并发 LLM 请求上限：防止向厂商发起过多并发被 429 限流。
-EXTRACT_CONCURRENCY = 5
+from core.config import SYNC_EXTRACT_CONCURRENCY
+
+EXTRACT_CONCURRENCY = SYNC_EXTRACT_CONCURRENCY
 
 
 def _persist_mysql_phase1(
@@ -104,7 +106,7 @@ def _persist_mysql_phase1(
 
     if published_at is None:
         result.debug_log.append(f"⏭ 缺少有效发布时间，跳过入库: {(art.title or '')[:60]}")
-        result.failed += 1
+        result.skipped_no_incident += 1
         return
 
     try:
@@ -1572,8 +1574,11 @@ async def async_sync_agentic_url(
     result = SyncResult()
     log = result.debug_log
     llm_backend = _build_llm_backend(api_key, base_url)
+    from core.meeting_catalog import resolve_meeting_official_hint
+
+    _ck, hint = resolve_meeting_official_hint(url)
     art_dict, _incidents, _kws, dbg = await run_agentic_crawl(
-        url, api_key=api_key, base_url=base_url
+        url, api_key=api_key, base_url=base_url, extra_hint=hint
     )
     log.extend(dbg)
     if not art_dict or not art_dict.get("is_relevant"):

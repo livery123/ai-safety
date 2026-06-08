@@ -1,0 +1,132 @@
+{
+  "rows": [
+    {
+      "id": 2,
+      "catalog_key": "ai_for_good",
+      "edition_label": "AI for Good Global Summit 2025",
+      "article_count": 0,
+      "brief_count": 1,
+      "brief_chars": 94
+    },
+    {
+      "id": 3,
+      "catalog_key": "ai_for_good",
+      "edition_label": "AI for Good Global Summit 2024",
+      "article_count": 0,
+      "brief_count": 1,
+      "brief_chars": 94
+    },
+    {
+      "id": 4,
+      "catalog_key": "un_ai_governance_dialogue",
+      "edition_label": "启动全球人工智能治理对话高级别会议",
+      "article_count": 0,
+      "brief_count": 1,
+      "brief_chars": 81
+    },
+    {
+      "id": 5,
+      "catalog_key": "un_ai_governance_dialogue",
+      "edition_label": "全球人工智能治理对话 (预期 2026)",
+      "article_count": 0,
+      "brief_count": 0,
+      "brief_chars": 0
+    },
+    {
+      "id": 6,
+      "catalog_key": "un_ai_governance_dialogue",
+      "edition_label": "全球人工智能治理对话 (预期 2027)",
+      "article_count": 0,
+      "brief_count": 0,
+      "brief_chars": 0
+    },
+    {
+      "id": 7,
+      "catalog_key": "waic",
+      "edition_label": "世界人工智能大会 2025",
+      "article_count": 0,
+      "brief_count": 1,
+      "brief_chars": 77
+    },
+    {
+      "id": 8,
+      "catalog_key": "waic",
+      "edition_label": "世界人工智能大会 2024",
+      "article_count": 0,
+      "brief_count": 1,
+      "brief_chars": 77
+    },
+    {
+      "id": 10,
+      "catalog_key": "ai_safety_summit",
+      "edition_label": "AI Seoul Summit (首尔人工智能峰会) 2024",
+      "article_count": 0,
+      "brief_count": 1,
+      "brief_chars": 95
+    },
+    {
+      "id": 12,
+      "catalog_key": "reaim",
+      "edition_label": "REAIM Summit 2024",
+      "article_count": 0,
+      "brief_count": 1,
+      "brief_chars": 81
+    },
+    {
+      "id": 13,
+      "catalog_key": "reaim",
+      "edition_label": "REAIM Summit 2023",
+      "article_count": 0,
+      "brief_count": 1,
+      "brief_chars": 81
+    },
+    {
+      "id": 14,
+      "catalog_key": "global_ai_standards",
+      "edition_label": "Global AI Standards Summit 2025",
+      "article_count": 0,
+      "brief_count": 1,
+      "brief_chars": 95
+    },
+    {
+      "id": 15,
+      "catalog_key": "global_ai_standards",
+      "edition_label": "International AI Standards Summit 2024",
+      "article_count": 0,
+      "brief_count": 1,
+      "brief_chars": 102
+    },
+    {
+      "id": 16,
+      "catalog_key": "india_ai_safety",
+      "edition_label": "India AI Safety Summit (监测占位)",
+      "article_count": 1,
+      "brief_count": 0,
+      "brief_chars": 0
+    },
+    {
+      "id": 1,
+      "catalog_key": "ai_for_good",
+      "edition_label": "AI for Good Global Summit 2026",
+      "article_count": 2,
+      "brief_count": 1,
+      "brief_chars": 2446
+    },
+    {
+      "id": 11,
+      "catalog_key": "ai_safety_summit",
+      "edition_label": "AI Safety Summit 2023",
+      "article_count": 3,
+      "brief_count": 2,
+      "brief_chars": 2285
+    },
+    {
+      "id": 9,
+      "catalog_key": "ai_safety_summit",
+      "edition_label": "AI Action Summit (人工智能行动峰会) 2025",
+      "article_count": 7,
+      "brief_count": 2,
+      "brief_chars": 2949
+    }
+  ]
+}

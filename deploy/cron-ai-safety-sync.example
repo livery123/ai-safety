@@ -18,21 +18,24 @@ LOG=/tmp/ai-safety-sync.log
 # 会议：文章归并到事件流（新闻包之后约 10 分钟）
 10 */6 * * * cd $ROOT && $PY scripts/link_meeting_articles.py --limit 500 >> $LOG 2>&1
 
-# 会议：按届定向 NYT 检索（仅近/近期会期，每周一 03:00）
+# 会议：按届定向 NYT+Guardian（仅近/近期会期，每周一 03:00；默认已开 Guardian）
 0 3 * * 1 cd $ROOT && $PY scripts/sync_meeting_event_news.py --recent --link-after >> $LOG 2>&1
 
 # 会议专题分析（每周一 09:00，在监测周报之后）
 0 9 * * 1 cd $ROOT && $PY scripts/generate_meeting_briefs.py >> $LOG 2>&1
 
-# 会议官网/成果页（每月 1 日 04:00，可选）
+# 会议官网/成果页（每月 1 日 04:00）
 0 4 1 * * cd $ROOT && $PY scripts/sync_meeting_officials.py --link-after >> $LOG 2>&1
+
+# 会议人工 URL 补洞（每月 1 日 04:30，限量）
+30 4 1 * * cd $ROOT && $PY scripts/ingest_meeting_urls.py --from-catalog --link-after --limit 30 >> $LOG 2>&1
 
 # 文献三源，每天 21:00（参数对齐 Streamlit 手动默认）
 0 21 * * * cd $ROOT && $PY scripts/sync_sources.py --source literature --literature-sources arxiv scopus springer --max-articles 3 --no-rag >> $LOG 2>&1
 
 # AI 治理监测周报（上一完整自然周，policy/meeting/literature/platform + 简报）
-# 独立日志：/var/log/ai-safety-weekly.log
-5 8 * * 1 cd $ROOT && $PY scripts/generate_weekly_report.py --all >> /var/log/ai-safety-weekly.log 2>&1
+# 独立日志：/tmp/ai-safety-weekly.log（避免 /var/log 无写权限导致 cron 静默失败）
+5 8 * * 1 cd $ROOT && $PY scripts/generate_weekly_report.py --all >> /tmp/ai-safety-weekly.log 2>&1
 
 # 历史补洞（勿放 cron；仅手动缺稿时）
 # cd $ROOT && $PY scripts/backfill_meeting_historical.py --date-from 2023-01-01 --no-guardian

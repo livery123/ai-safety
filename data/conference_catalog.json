@@ -58,6 +58,7 @@
       "category": "联合国 AI 治理对话",
       "is_major": true,
       "sort_order": 20,
+      "preferred_sources": ["guardian", "nyt"],
       "aliases": ["全球人工智能治理对话", "UN AI governance dialogue", "Global Dialogue on AI Governance", "联合国人工智能治理"],
       "topics": ["多边AI治理", "联合国框架"],
       "official_urls": ["https://www.un.org/global-dialogue-ai-governance/"],
@@ -109,7 +110,15 @@
       "category": "世界人工智能大会",
       "is_major": true,
       "sort_order": 30,
-      "aliases": ["WAIC", "世界人工智能大会", "World Artificial Intelligence Conference", "上海世界人工智能大会"],
+      "preferred_sources": ["guardian", "nyt"],
+      "aliases": [
+        "WAIC",
+        "世界人工智能大会",
+        "2024世界人工智能大会",
+        "2025世界人工智能大会",
+        "World Artificial Intelligence Conference",
+        "上海世界人工智能大会"
+      ],
       "topics": ["产业AI", "治理与开放合作"],
       "official_urls": ["https://www.worldaic.com.cn/"],
       "events": [
@@ -124,7 +133,8 @@
           "status": "completed",
           "participating_countries": ["中国", "美国", "多国企业代表"],
           "outcomes_summary": "产业治理与开放合作议题",
-          "crawl_urls": ["https://www.worldaic.com.cn/"]
+          "crawl_urls": ["https://www.worldaic.com.cn/"],
+          "manual_ingest_urls": ["https://www.worldaic.com.cn/"]
         },
         {
           "edition_label": "世界人工智能大会 2024",
@@ -137,7 +147,8 @@
           "status": "completed",
           "participating_countries": ["中国", "多国"],
           "outcomes_summary": "发布产业与治理相关成果",
-          "crawl_urls": ["https://www.worldaic.com.cn/"]
+          "crawl_urls": ["https://www.worldaic.com.cn/"],
+          "manual_ingest_urls": ["https://www.worldaic.com.cn/"]
         }
       ]
     },
@@ -180,6 +191,9 @@
           "official_url": "https://www.gov.uk/government/collections/ai-seoul-summit-2024",
           "status": "completed",
           "notes": "签署《首尔宣言》",
+          "manual_ingest_urls": [
+            "https://www.gov.uk/government/publications/seoul-declaration-for-safe-innovative-and-inclusive-ai"
+          ],
           "participating_countries": ["韩国", "美国", "英国", "法国", "中国", "加拿大", "欧盟代表", "多国"],
           "outcomes_summary": "签署《首尔宣言》，扩大 AI 安全国际合作",
           "crawl_urls": [
@@ -286,7 +300,7 @@
       "catalog_key": "india_ai_safety",
       "series_name": "印度 AI 安全峰会",
       "category": "印度 AI 安全峰会",
-      "is_major": true,
+      "is_major": false,
       "sort_order": 70,
       "aliases": ["India AI Safety Summit", "印度 AI 安全峰会", "印度人工智能安全峰会", "India AI Safety", "新德里 AI 安全"],
       "topics": ["AI安全治理", "南半球多边协调"],

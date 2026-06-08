@@ -108,6 +108,12 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+# --- 爬虫 LLM 抽取（长文政策源易超时，可通过 .env 调大）---
+LLM_EXTRACT_TIMEOUT: float = float(os.getenv("LLM_EXTRACT_TIMEOUT", "180"))
+LLM_EXTRACT_MAX_RETRIES: int = _env_int("LLM_EXTRACT_MAX_RETRIES", 2)
+SYNC_EXTRACT_CONCURRENCY: int = max(1, min(_env_int("SYNC_EXTRACT_CONCURRENCY", 2), 5))
+
+
 POLICY_EU_DAYS_BACK: int = _env_int("POLICY_EU_DAYS_BACK", 14)
 POLICY_BR_MAX_OFFSETS: int = _env_int("POLICY_BR_MAX_OFFSETS", 20)
 POLICY_BR_LOOKBACK_DAYS: int = _env_int("POLICY_BR_LOOKBACK_DAYS", 120)
@@ -137,6 +143,18 @@ MEETING_NEWS_NYT_MAX_PAGES: int = _env_int("MEETING_NEWS_NYT_MAX_PAGES", 3)
 MEETING_NEWS_GUARDIAN_MAX_PAGES: int = _env_int("MEETING_NEWS_GUARDIAN_MAX_PAGES", 2)
 MEETING_NEWS_RECENT_PAST_DAYS: int = _env_int("MEETING_NEWS_RECENT_PAST_DAYS", 30)
 MEETING_NEWS_RECENT_FUTURE_DAYS: int = _env_int("MEETING_NEWS_RECENT_FUTURE_DAYS", 90)
+MEETING_NEWS_GUARDIAN_DEFAULT: bool = _env_bool("MEETING_NEWS_GUARDIAN_DEFAULT", True)
+
+# linker 未匹配 meeting 稿写入审计表的最低规则分
+MEETING_DISCOVERY_MIN_SCORE: float = float(os.getenv("MEETING_DISCOVERY_MIN_SCORE", "0.25"))
+MEETING_NEWS_GUARDIAN_DEFAULT: bool = _env_bool("MEETING_NEWS_GUARDIAN_DEFAULT", True)
+
+# linker 未匹配 meeting 稿写入审计表的最低规则分
+MEETING_DISCOVERY_MIN_SCORE: float = float(os.getenv("MEETING_DISCOVERY_MIN_SCORE", "0.25"))
+MEETING_NEWS_GUARDIAN_DEFAULT: bool = _env_bool("MEETING_NEWS_GUARDIAN_DEFAULT", True)
+
+# linker 未匹配 meeting 稿写入审计表的最低规则分
+MEETING_DISCOVERY_MIN_SCORE: float = float(os.getenv("MEETING_DISCOVERY_MIN_SCORE", "0.25"))
 
 # NYT/Guardian 会议增强检索词（轮换）
 MEETING_BACKFILL_QUERIES: tuple[str, ...] = tuple(

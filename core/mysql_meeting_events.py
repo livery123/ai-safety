@@ -540,25 +540,100 @@ def count_meeting_extractions_since(since: datetime) -> int:
             return int((row or {}).get("c") or 0)
 
 
+def count_event_articles(event_id: int) -> int:
+    """功能：统计某届已关联报道数。"""
+    with mysql_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM meeting_event_articles WHERE event_id = %s",
+                (event_id,),
+            )
+            row = cur.fetchone()
+            return int((row or {}).get("c") or 0)
+
+
 def events_needing_brief(
     *,
     min_articles: int = 2,
     days_after_end: int = 7,
+    require_articles: bool = True,
 ) -> List[Dict[str, Any]]:
-    """返回应生成专题分析的事件（有足够文章或已结束）。"""
-    sql = """
+    """返回应生成专题分析的事件（默认仅关联报道数达标）。"""
+    _ = days_after_end
+    having = "article_count >= %s"
+    params: List[Any] = [min_articles]
+    if not require_articles:
+        having += (
+            " OR (e.end_date IS NOT NULL AND e.end_date <= DATE_SUB(CURDATE(), INTERVAL %s DAY))"
+        )
+        params.append(days_after_end)
+    sql = f"""
         SELECT e.id, e.catalog_key, e.edition_label, e.end_date,
                COUNT(m.id) AS article_count
         FROM meeting_events e
         LEFT JOIN meeting_event_articles m ON m.event_id = e.id
-        LEFT JOIN meeting_event_analyses a ON a.event_id = e.id
         GROUP BY e.id
-        HAVING article_count >= %s
-           OR (e.end_date IS NOT NULL AND e.end_date <= DATE_SUB(CURDATE(), INTERVAL %s DAY))
+        HAVING {having}
     """
     with mysql_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (min_articles, days_after_end))
+            cur.execute(sql, tuple(params))
+            return list(cur.fetchall() or [])
+
+
+def insert_discovery_candidate(
+    *,
+    article_id: int,
+    title: str,
+    proposed_series_name: str = "",
+    meeting_catalog_key: str = "",
+    match_score: float = 0.0,
+    reason: str = "",
+) -> None:
+    """功能：记录未归并的 meeting 稿供人工补 catalog。"""
+    with mysql_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO meeting_discovery_candidates (
+                    article_id, title, proposed_series_name, meeting_catalog_key,
+                    match_score, reason
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    title = VALUES(title),
+                    proposed_series_name = VALUES(proposed_series_name),
+                    meeting_catalog_key = VALUES(meeting_catalog_key),
+                    match_score = VALUES(match_score),
+                    reason = VALUES(reason),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    article_id,
+                    title[:512],
+                    proposed_series_name[:256],
+                    meeting_catalog_key[:64],
+                    match_score,
+                    reason[:512],
+                ),
+            )
+        conn.commit()
+
+
+def list_discovery_candidates(*, limit: int = 50, min_score: float = 0.0) -> List[Dict[str, Any]]:
+    """功能：列出待审 meeting 发现候选。"""
+    with mysql_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, article_id, title, proposed_series_name, meeting_catalog_key,
+                       match_score, reason, created_at, updated_at
+                FROM meeting_discovery_candidates
+                WHERE match_score >= %s
+                ORDER BY match_score DESC, updated_at DESC
+                LIMIT %s
+                """,
+                (min_score, limit),
+            )
             return list(cur.fetchall() or [])
 
 

@@ -23,7 +23,7 @@ from core.config import API_KEY, BASE_URL, CRAWL_PAGE_TIMEOUT_MS, CRAWL_WAIT_UNT
 from core.db import update_watched_keywords
 from core.llm_client import OpenAICompatibleBackend
 from crawler.extraction import _parse_article_obj, article_dict_to_incident_like
-from engine.prompts import AGENTIC_CRAWL_INSTRUCTION
+from engine.prompts import build_agentic_crawl_instruction
 from engine.rag_ingestion import apply_rag_to_incidents
 from models.schema import ArticleExtractionPayload
 
@@ -47,6 +47,8 @@ async def run_agentic_crawl(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     debug: bool = False,
+    *,
+    extra_hint: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], List[Any], List[str], List[str]]:
     _ = debug
     debug_log: List[str] = []
@@ -74,7 +76,7 @@ async def run_agentic_crawl(
         extraction_strategy = LLMExtractionStrategy(
             llm_config=llm_config,
             schema=ArticleExtractionPayload.model_json_schema(),
-            instruction=AGENTIC_CRAWL_INSTRUCTION,
+            instruction=build_agentic_crawl_instruction(url=url, extra_hint=extra_hint),
         )
 
         config = CrawlerRunConfig(

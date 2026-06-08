@@ -109,11 +109,19 @@ EXTRACTION_USER_TAIL = (
     "不要捏造事实；不要 {\"incidents\":[...]}。"
 )
 
+MEETING_OFFICIAL_HINT = (
+    "【会议官网/宣言/成果页】若材料为峰会官网、宣言 PDF 摘要、议程或成果发布：\n"
+    "- content_type 优先 meeting；填写 meeting_catalog_key（见名录）、meeting_edition_hint（年份/届次）；\n"
+    "- meeting_phase：议程/预热→pre，召开期间→during，宣言/会后文件→post；\n"
+    "- summary_structured 概括治理成果与多边协调要点，勿拆发言人条目。\n"
+)
+
 AGENTIC_CRAWL_INSTRUCTION = (
     PLATFORM_MISSION
     + "你是 AI 治理与安全**监测入库分析师**。对页面输出**一个** JSON，字段须符合 schema。\n"
     + RELEVANCE_FILTER
     + PUBLISH_GEO_GUIDANCE
+    + MEETING_OFFICIAL_HINT
     + "相关时填：is_relevant=true、content_type、main_topic、risk_subdomains、"
     "publish_country、publish_region、international_orgs、publish_authority、"
     "entities（不含发布主体）、summary_structured（突出治理监管含义）、tags；\n"
@@ -121,6 +129,27 @@ AGENTIC_CRAWL_INSTRUCTION = (
     + "可选 relevance_reason；会议稿用会议级信息；"
     "不相关时仅 {\"is_relevant\":false,\"reject_reason\":\"no_ai_governance_content\"}。"
 )
+
+
+def build_agentic_crawl_instruction(*, url: str = "", extra_hint: str = "") -> str:
+    """
+    功能：构造 agentic 抓取 instruction（含官网域附加提示）。
+    输入：目标 URL、可选 extra_hint（catalog_key 语境）。
+    输出：完整 instruction 字符串。
+    """
+    base = AGENTIC_CRAWL_INSTRUCTION
+    if extra_hint:
+        base += f"\n【本页上下文】{extra_hint}\n"
+    if url:
+        try:
+            from core.meeting_catalog import resolve_meeting_official_hint
+
+            _ck, hint = resolve_meeting_official_hint(url)
+            if hint:
+                base += f"\n{hint}\n"
+        except Exception:
+            pass
+    return base
 
 # ---------------------------------------------------------------------------
 # 问答式深度调研（research_report）

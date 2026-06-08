@@ -9,12 +9,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from core.config import API_KEY, BASE_URL
+from core.config import API_KEY, BASE_URL, LLM_EXTRACT_MAX_RETRIES, LLM_EXTRACT_TIMEOUT
 from core.llm_client import OpenAICompatibleBackend
 from core.publish_actor import (
     CrawlHints,
@@ -262,7 +263,8 @@ async def async_extract_article_from_text(
     base_url: Optional[str] = None,
     backend: Optional[OpenAICompatibleBackend] = None,
     temperature: float = 0.1,
-    timeout: float = 120.0,
+    timeout: Optional[float] = None,
+    max_retries: Optional[int] = None,
     crawl_hints: Optional[CrawlHints] = None,
 ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     debug: List[str] = []
@@ -279,12 +281,33 @@ async def async_extract_article_from_text(
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": f"{_USER_INSTRUCTION}\n\n---\n{text}"},
     ]
-    try:
-        raw_obj = await llm.async_chat_completion_json(
-            messages, temperature=temperature, timeout=timeout
-        )
-    except Exception as e:
-        debug.append(f"❌ LLM 异步调用失败 [{source_url[:60]}]: {type(e).__name__}: {e}")
+    base_timeout = float(timeout if timeout is not None else LLM_EXTRACT_TIMEOUT)
+    retries = max(1, int(max_retries if max_retries is not None else LLM_EXTRACT_MAX_RETRIES))
+    raw_obj: Any = None
+    for attempt in range(1, retries + 1):
+        attempt_timeout = base_timeout * (1.0 + 0.25 * (attempt - 1))
+        try:
+            raw_obj = await llm.async_chat_completion_json(
+                messages, temperature=temperature, timeout=attempt_timeout
+            )
+            if attempt > 1:
+                debug.append(
+                    f"✓ 第 {attempt} 次重试成功 (timeout={attempt_timeout:.0f}s) [{source_url[:40]}]"
+                )
+            break
+        except Exception as e:
+            if attempt < retries and _is_llm_retryable(e):
+                debug.append(
+                    f"⚠️ LLM {type(e).__name__}，2s 后重试 "
+                    f"({attempt}/{retries}, timeout={attempt_timeout:.0f}s) [{source_url[:40]}]"
+                )
+                await asyncio.sleep(2.0)
+                continue
+            debug.append(f"❌ LLM 异步调用失败 [{source_url[:60]}]: {type(e).__name__}: {e}")
+            return None, debug
+
+    if raw_obj is None:
+        debug.append(f"❌ LLM 无响应 [{source_url[:60]}]")
         return None, debug
 
     art = _parse_article_obj(raw_obj)

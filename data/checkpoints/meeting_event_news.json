@@ -1,11 +1,14 @@
 {
   "completed": [
+    "event_news:guardian:13",
     "event_news:nyt:1",
     "event_news:nyt:10",
     "event_news:nyt:11",
     "event_news:nyt:12",
+    "event_news:nyt:13",
     "event_news:nyt:14",
     "event_news:nyt:15",
+    "event_news:nyt:16",
     "event_news:nyt:2",
     "event_news:nyt:3",
     "event_news:nyt:4",
@@ -16,10 +19,10 @@
     "event_news:nyt:9"
   ],
   "stats": {
-    "saved": 11,
-    "skipped_url_dup": 0,
-    "skipped_no_incident": 249,
+    "saved": 18,
+    "skipped_url_dup": 2,
+    "skipped_no_incident": 290,
     "failed": 0
   },
-  "updated_at": "2026-06-04T00:08:22"
+  "updated_at": "2026-06-04T23:58:43"
 }

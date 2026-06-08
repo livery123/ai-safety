@@ -149,6 +149,7 @@ def record_news_bundle_tasks(
     saved = int(getattr(merged, "saved", 0) or 0)
     failed = int(getattr(merged, "failed", 0) or 0)
     log_tail = list(getattr(merged, "debug_log", []) or [])
+    # 整包已跑完：仅当「零入库且存在信源级失败计数」才记 failed，避免单篇跳过拖垮 SLA
     status = "failed" if failed > 0 and saved == 0 else "success"
     by_source = {
         k: int(getattr(v, "saved", 0) or 0)

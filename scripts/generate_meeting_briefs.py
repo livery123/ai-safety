@@ -15,7 +15,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from core.config import LLM_MODEL, MEETING_BRIEF_DAYS_AFTER_END, MEETING_BRIEF_MIN_ARTICLES  # noqa: E402
-from core.mysql_meeting_events import events_needing_brief, save_event_analysis  # noqa: E402
+from core.mysql_meeting_events import (  # noqa: E402
+    count_event_articles,
+    events_needing_brief,
+    save_event_analysis,
+)
 from engine.meeting_brief import generate_meeting_brief_markdown  # noqa: E402
 
 
@@ -41,7 +45,11 @@ def main() -> int:
         return 0
 
     for eid in ids:
-        print(f"▶ 生成 event_id={eid} ...", flush=True)
+        ac = count_event_articles(eid)
+        if ac < args.min_articles and not args.force:
+            print(f"⏭ event_id={eid} 关联报道 {ac} < {args.min_articles}，跳过", flush=True)
+            continue
+        print(f"▶ 生成 event_id={eid}（报道 {ac} 篇）...", flush=True)
         md = generate_meeting_brief_markdown(eid)
         aid = save_event_analysis(eid, md, model_name=LLM_MODEL)
         print(f"  ✓ analysis_id={aid}，字数≈{len(md)}", flush=True)
